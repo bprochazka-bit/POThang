@@ -152,6 +152,9 @@ def apply_tags(item: Item, names: Iterable[str]) -> None:
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
 _LOOP_OPEN_RE = re.compile(r"\{\{\s*#\s*items\s*\}\}")
 _LOOP_CLOSE_RE = re.compile(r"\{\{\s*/\s*items\s*\}\}")
+_IF_OPEN_RE = re.compile(r"\{\{\s*#\s*if\s+([a-zA-Z0-9_.]+)\s*\}\}")
+_ELSE_RE = re.compile(r"\{\{\s*else\s*\}\}")
+_IF_CLOSE_RE = re.compile(r"\{\{\s*/\s*if\s*\}\}")
 
 
 def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes) -> bytes:
@@ -212,7 +215,41 @@ def _line_context(line: POLine, idx: int) -> dict:
     }
 
 
+def _resolve_conditionals(text: str, ctx: dict) -> str:
+    """Process {{#if var}}...{{else}}...{{/if}} blocks within a cell value.
+
+    The {{else}} branch is optional; omitting it means an empty string when
+    the condition is false. Blocks do not nest.
+    """
+    result = []
+    pos = 0
+    while pos < len(text):
+        m = _IF_OPEN_RE.search(text, pos)
+        if m is None:
+            result.append(text[pos:])
+            break
+        result.append(text[pos:m.start()])
+        var = m.group(1)
+        end_m = _IF_CLOSE_RE.search(text, m.end())
+        if end_m is None:
+            # Malformed block — leave the rest untouched.
+            result.append(text[m.start():])
+            break
+        inner = text[m.end():end_m.start()]
+        else_m = _ELSE_RE.search(inner)
+        condition = bool(ctx.get(var))
+        if else_m:
+            branch = inner[:else_m.start()] if condition else inner[else_m.end():]
+        else:
+            branch = inner if condition else ""
+        result.append(branch)
+        pos = end_m.end()
+    return "".join(result)
+
+
 def _substitute(text: str, ctx: dict) -> str:
+    text = _resolve_conditionals(text, ctx)
+
     def repl(m):
         key = m.group(1)
         val = ctx.get(key)

@@ -110,6 +110,80 @@ def test_render_with_no_lines_drops_loop(app, db):
                 assert "{{item." not in c.value
 
 
+def _build_conditional_template_bytes() -> bytes:
+    """Template with an {{#if}} conditional in the loop row."""
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "{{#items}}"
+    # Row 2 is the template row — between the markers.
+    # Show model/sku when sku is present, otherwise just model.
+    ws["B2"] = "{{#if item.vendor_sku}}{{item.model}}/{{item.vendor_sku}}{{else}}{{item.model}}{{/if}}"
+    ws["A3"] = "{{/items}}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_conditional_both_fields_present(app, db):
+    item = Item(name="Widget", model="MDL-1", vendor_sku="SKU-99")
+    db.session.add(item)
+    db.session.flush()
+    po = PurchaseOrder(po_number="PO-COND-1", vendor="Acme")
+    db.session.add(po)
+    db.session.flush()
+    db.session.add(POLine(po_id=po.id, item_id=item.id, qty=1, unit_cost=5.0))
+    db.session.commit()
+
+    rendered = render_po_xlsx(po, _build_conditional_template_bytes())
+    ws = load_workbook(io.BytesIO(rendered)).active
+    assert ws.cell(row=1, column=2).value == "MDL-1/SKU-99"
+
+
+def test_conditional_sku_absent(app, db):
+    item = Item(name="Widget", model="MDL-1")
+    db.session.add(item)
+    db.session.flush()
+    po = PurchaseOrder(po_number="PO-COND-2", vendor="Acme")
+    db.session.add(po)
+    db.session.flush()
+    db.session.add(POLine(po_id=po.id, item_id=item.id, qty=1, unit_cost=5.0))
+    db.session.commit()
+
+    rendered = render_po_xlsx(po, _build_conditional_template_bytes())
+    ws = load_workbook(io.BytesIO(rendered)).active
+    assert ws.cell(row=1, column=2).value == "MDL-1"
+
+
+def test_conditional_if_only_no_else(app, db):
+    """{{#if var}}text{{/if}} renders text when truthy, empty string when falsy."""
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "{{#items}}"
+    ws["B2"] = "{{#if item.notes}}Note: {{item.notes}}{{/if}}"
+    ws["A3"] = "{{/items}}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    tmpl = buf.getvalue()
+
+    item_with_note = Item(name="A", notes=None)
+    item_no_note = Item(name="B", notes=None)
+    db.session.add_all([item_with_note, item_no_note])
+    db.session.flush()
+    po = PurchaseOrder(po_number="PO-COND-3", vendor="Acme")
+    db.session.add(po)
+    db.session.flush()
+    line_with = POLine(po_id=po.id, item_id=item_with_note.id, qty=1, unit_cost=1.0, notes="fragile")
+    line_without = POLine(po_id=po.id, item_id=item_no_note.id, qty=1, unit_cost=1.0)
+    db.session.add_all([line_with, line_without])
+    db.session.commit()
+
+    rendered = render_po_xlsx(po, tmpl)
+    ws = load_workbook(io.BytesIO(rendered)).active
+    values = [ws.cell(row=r, column=2).value for r in (1, 2)]
+    assert "Note: fragile" in values
+    assert "" in values or None in values
+
+
 def test_sample_template_renders(app, db):
     """Render against the bundled sample template; must not throw."""
     po = _seed_po(db)
