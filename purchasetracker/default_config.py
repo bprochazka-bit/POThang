@@ -14,6 +14,10 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     "xlsx", "xls", "csv", "docx", "doc", "odt", "ods",
 }
 
+# Folder of reusable xlsx PO templates. Auto-seeded with the sample template
+# on first run. Path resolved relative to the project root if not absolute.
+PO_TEMPLATES_DIR = "po_templates"
+
 ITEM_STATES = [
     "requested",
     "approved",

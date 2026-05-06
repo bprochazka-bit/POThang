@@ -289,7 +289,9 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
             })
         template.append(row_snapshot)
 
-    lines = list(po.lines)
+    lines = sorted(po.lines,
+                   key=lambda l: ((l.item.vendor or "").lower(),
+                                  (l.item.name or "").lower()))
 
     # Strategy:
     #   1. Delete the loop markers and template rows.

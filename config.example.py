@@ -19,6 +19,11 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     "xlsx", "xls", "csv", "docx", "doc", "odt", "ods",
 }
 
+# Folder of reusable xlsx PO templates shown in the "Render from template"
+# dropdown. Drop any .xlsx files here; the sample template is copied in on
+# first run. Path resolved relative to the project root if not absolute.
+PO_TEMPLATES_DIR = "po_templates"
+
 # --- Workflow ---
 # Order matters; the UI presents transitions in this order.
 ITEM_STATES = [

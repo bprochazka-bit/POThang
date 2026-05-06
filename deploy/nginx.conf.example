@@ -3,10 +3,25 @@
 # that header because the request comes from 127.0.0.1.
 #
 # Set AUTH_MODE = "proxy_header" in instance/config.py.
+#
+# SSL: replace the ssl_certificate paths with your actual cert/key.
+# With Certbot/Let's Encrypt: certbot --nginx -d purchases.internal.example.org
 
 server {
     listen 80;
     server_name purchases.internal.example.org;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name purchases.internal.example.org;
+
+    ssl_certificate     /etc/ssl/certs/purchases.internal.example.org.pem;
+    ssl_certificate_key /etc/ssl/private/purchases.internal.example.org.key;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
 
     # Strip any X-Remote-* headers from clients before they reach the auth
     # request - Authentik / oauth2-proxy will set them for real.
@@ -23,14 +38,14 @@ server {
 
     location / {
         auth_request /outpost.goauthentik.io/auth/nginx;
-        auth_request_set $remote_user $upstream_http_x_authentik_username;
-        auth_request_set $remote_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_user $upstream_http_x_authentik_username;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
 
         proxy_pass http://127.0.0.1:8137;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Remote-User $remote_user;
-        proxy_set_header X-Remote-Email $remote_email;
+        proxy_set_header X-Remote-User $authentik_user;
+        proxy_set_header X-Remote-Email $authentik_email;
     }
 }

@@ -1,12 +1,16 @@
 """Purchase order CRUD, line management, receipts, and xlsx rendering."""
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
+import json
 from io import BytesIO
+from pathlib import Path
 
 from flask import (
-    Blueprint, abort, current_app, flash, redirect, render_template, request,
-    send_file, url_for,
+    Blueprint, Response, abort, current_app, flash, redirect,
+    render_template, request, send_file, url_for,
 )
 
 from ..auth import login_required
@@ -83,6 +87,9 @@ def detail(po_id: int):
 
     all_tags = [t.name for t in db.session.query(Tag).order_by(Tag.name).all()]
 
+    tpl_dir = Path(current_app.config["PO_TEMPLATES_DIR_RESOLVED"])
+    po_templates = sorted(p.name for p in tpl_dir.glob("*.xlsx"))
+
     return render_template(
         "pos/detail.html",
         po=po,
@@ -91,6 +98,7 @@ def detail(po_id: int):
         all_tags=all_tags,
         tag_filter=tag_filter,
         statuses=PO_STATUSES,
+        po_templates=po_templates,
     )
 
 
@@ -154,6 +162,42 @@ def add_line(po_id: int):
     return redirect(url_for("pos.detail", po_id=po.id))
 
 
+@bp.route("/<int:po_id>/lines/add-all", methods=["POST"])
+@login_required
+def add_all(po_id: int):
+    po = db.session.get(PurchaseOrder, po_id) or abort(404)
+    tag_filter = request.form.get("tag", "").strip()
+
+    q = (
+        db.session.query(Item)
+        .filter(Item.state.in_(["requested", "approved", "ordered", "partial"]))
+    )
+    if tag_filter:
+        q = q.join(Item.tags).filter(Tag.name == tag_filter)
+    available = [i for i in q.order_by(Item.name).all() if i.qty_unallocated > 0]
+    candidates = [i for i in available if i.is_complete]
+
+    if not candidates:
+        flash("No eligible items to add.", "error")
+        return redirect(url_for("pos.detail", po_id=po.id,
+                                **{"tag": tag_filter} if tag_filter else {}))
+
+    added = 0
+    for item in candidates:
+        qty = item.qty_unallocated
+        line = POLine(po_id=po.id, item_id=item.id, qty=qty,
+                      unit_cost=item.unit_cost)
+        db.session.add(line)
+        db.session.flush()
+        recompute_item_state(item)
+        added += 1
+
+    db.session.commit()
+    flash(f"Added {added} item{'' if added == 1 else 's'} to PO.")
+    return redirect(url_for("pos.detail", po_id=po.id,
+                            **{"tag": tag_filter} if tag_filter else {}))
+
+
 @bp.route("/lines/<int:line_id>/delete", methods=["POST"])
 @login_required
 def delete_line(line_id: int):
@@ -198,14 +242,34 @@ def receive_line(line_id: int):
 @bp.route("/<int:po_id>/render", methods=["POST"])
 @login_required
 def render_xlsx(po_id: int):
-    """Render this PO using the uploaded xlsx template."""
+    """Render this PO using a saved or uploaded xlsx template."""
     po = db.session.get(PurchaseOrder, po_id) or abort(404)
-    template = request.files.get("template")
-    if not template or not template.filename:
-        flash("Pick an xlsx template to render against.", "error")
+
+    template_bytes: bytes | None = None
+
+    # Uploaded file takes priority over a saved template selection.
+    uploaded = request.files.get("template")
+    if uploaded and uploaded.filename:
+        template_bytes = uploaded.read()
+    else:
+        template_name = (request.form.get("template_name") or "").strip()
+        if template_name and template_name != "__upload__":
+            tpl_dir = Path(current_app.config["PO_TEMPLATES_DIR_RESOLVED"])
+            tpl_path = (tpl_dir / template_name).resolve()
+            # Guard against path traversal.
+            if tpl_dir.resolve() not in tpl_path.parents:
+                abort(400)
+            if not tpl_path.exists():
+                flash("Template not found.", "error")
+                return redirect(url_for("pos.detail", po_id=po.id))
+            template_bytes = tpl_path.read_bytes()
+
+    if not template_bytes:
+        flash("Pick a template to render against.", "error")
         return redirect(url_for("pos.detail", po_id=po.id))
+
     try:
-        rendered = render_po_xlsx(po, template.read())
+        rendered = render_po_xlsx(po, template_bytes)
     except Exception as e:
         current_app.logger.exception("PO render failed")
         flash(f"Render failed: {e}", "error")
@@ -217,4 +281,63 @@ def render_xlsx(po_id: int):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
         download_name=fname,
+    )
+
+
+@bp.route("/<int:po_id>/export/json")
+@login_required
+def export_json(po_id: int):
+    """Export this PO and its line items as JSON."""
+    po = db.session.get(PurchaseOrder, po_id) or abort(404)
+    payload = {
+        "exported_at": dt.datetime.utcnow().isoformat(),
+        "purchase_order": po.to_dict(),
+    }
+    body = json.dumps(payload, indent=2)
+    safe_num = po.po_number.replace("/", "-").replace("\\", "-")
+    return Response(
+        body,
+        mimetype="application/json",
+        headers={"Content-Disposition":
+                 f'attachment; filename="po-{safe_num}.json"'},
+    )
+
+
+@bp.route("/<int:po_id>/export/csv")
+@login_required
+def export_csv(po_id: int):
+    """Export the line items of this PO as CSV."""
+    po = db.session.get(PurchaseOrder, po_id) or abort(404)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "po_number", "item_id", "name", "description", "vendor", "model",
+        "vendor_sku", "url", "qty_ordered", "qty_received", "unit_cost",
+        "line_total", "state", "tags", "notes",
+    ])
+    for line in po.lines:
+        item = line.item
+        writer.writerow([
+            po.po_number,
+            item.id if item else "",
+            item.name if item else "",
+            (item.description or "").replace("\n", " ") if item else "",
+            item.vendor or "" if item else "",
+            item.model or "" if item else "",
+            item.vendor_sku or "" if item else "",
+            item.url or "" if item else "",
+            line.qty,
+            line.qty_received,
+            line.unit_cost,
+            line.line_total,
+            item.state if item else "",
+            ";".join(t.name for t in item.tags) if item else "",
+            (item.notes or "").replace("\n", " ") if item else "",
+        ])
+    safe_num = po.po_number.replace("/", "-").replace("\\", "-")
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition":
+                 f'attachment; filename="po-{safe_num}.csv"'},
     )
