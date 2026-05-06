@@ -153,17 +153,57 @@
 
 <section class="card">
   <h2>Render from template</h2>
-  <form method="post" action="{{ url_for('pos.render_xlsx', po_id=po.id) }}" enctype="multipart/form-data" class="inline">
-    <input type="file" name="template" accept=".xlsx" required>
+  <form method="post" action="{{ url_for('pos.render_xlsx', po_id=po.id) }}"
+        enctype="multipart/form-data" class="inline" id="render-form">
+    {% if po_templates %}
+    <select name="template_name" id="tpl-select">
+      {% for t in po_templates %}
+      <option value="{{ t }}">{{ t }}</option>
+      {% endfor %}
+      <option value="__upload__">Upload custom template…</option>
+    </select>
+    {% endif %}
+    <span id="tpl-upload-area"{% if po_templates %} style="display:none"{% endif %}>
+      <input type="file" name="template" accept=".xlsx"
+             {% if not po_templates %}required{% endif %}>
+    </span>
     <button type="submit">Render xlsx</button>
   </form>
-  <p><small>Upload an xlsx with placeholders like
-    <code>&#123;&#123;po_number&#125;&#125;</code>,
+  <p><small>
+    {% if po_templates %}
+    Select a saved template from the <code>po_templates/</code> folder, or
+    choose &ldquo;Upload custom template&rdquo; to use a one-off file.
+    {% else %}
+    Upload an xlsx template file.
+    {% endif %}
+    Supported placeholders: <code>&#123;&#123;po_number&#125;&#125;</code>,
     <code>&#123;&#123;vendor&#125;&#125;</code>,
     <code>&#123;&#123;total&#125;&#125;</code>, and an items loop region
-    bounded by <code>&#123;&#123;#items&#125;&#125;</code> and
-    <code>&#123;&#123;/items&#125;&#125;</code>. See
-    <code>sample_template/po_template.xlsx</code> for a working example.</small></p>
+    bounded by <code>&#123;&#123;#items&#125;&#125;</code> /
+    <code>&#123;&#123;/items&#125;&#125;</code>.
+  </small></p>
+  <script>
+  (function () {
+    var sel = document.getElementById('tpl-select');
+    if (!sel) return;
+    var area = document.getElementById('tpl-upload-area');
+    sel.addEventListener('change', function () {
+      var show = sel.value === '__upload__';
+      area.style.display = show ? '' : 'none';
+      area.querySelector('input[type=file]').required = show;
+    });
+  })();
+  </script>
+</section>
+
+<section class="card">
+  <h2>Export</h2>
+  <p>
+    <a href="{{ url_for('pos.export_csv', po_id=po.id) }}">Download CSV</a>
+    &middot;
+    <a href="{{ url_for('pos.export_json', po_id=po.id) }}">Download JSON</a>
+  </p>
+  <p><small>CSV contains one row per line item. JSON includes full PO and line details.</small></p>
 </section>
 
 <section class="card">

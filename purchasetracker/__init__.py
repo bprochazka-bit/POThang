@@ -39,6 +39,17 @@ def create_app(config_overrides=None):
     app.config["UPLOAD_DIR_RESOLVED"] = str(upload_dir)
     app.config["MAX_CONTENT_LENGTH"] = app.config["MAX_UPLOAD_MB"] * 1024 * 1024
 
+    # Resolve PO_TEMPLATES_DIR and seed with the sample template on first run.
+    tpl_dir = Path(app.config["PO_TEMPLATES_DIR"])
+    if not tpl_dir.is_absolute():
+        tpl_dir = Path(app.root_path).parent / tpl_dir
+    tpl_dir.mkdir(parents=True, exist_ok=True)
+    app.config["PO_TEMPLATES_DIR_RESOLVED"] = str(tpl_dir)
+    if not any(tpl_dir.glob("*.xlsx")):
+        sample = Path(app.root_path).parent / "sample_template" / "po_template.xlsx"
+        if sample.exists():
+            shutil.copy(sample, tpl_dir / sample.name)
+
     db.init_app(app)
     init_auth(app)
 
