@@ -402,6 +402,8 @@ def wizard_review(sid: str):
         mode = request.form.get("mode", "commit")
         edits = _collect_edits(request.form, staging)
         staging["edits"] = edits
+        staging["skipped_rows"] = _collect_skipped(request.form,
+                                                    len(staging["rows"]))
         import_staging.save(sid, staging)
 
         if mode == "save_edits":
@@ -429,8 +431,9 @@ def wizard_review(sid: str):
         staging=staging,
         fields=WIZARD_FIELDS,
         preview=preview,
-        complete_count=sum(1 for r in preview if r["complete"]),
+        complete_count=sum(1 for r in preview if r["complete"] and not r["skipped"]),
         total=len(preview),
+        included_count=sum(1 for r in preview if not r["skipped"]),
     )
 
 
@@ -450,6 +453,7 @@ def _build_preview(staging: dict) -> list[dict]:
     constants = staging.get("constants", {})
     edits = staging.get("edits", {})
 
+    skipped_set = set(staging.get("skipped_rows", []))
     out = []
     for idx, src in enumerate(staging["rows"]):
         record = {}
@@ -469,6 +473,7 @@ def _build_preview(staging: dict) -> list[dict]:
         record["qty"] = _coerce_int(record.get("qty"), default=1)
         record["unit_cost"] = _coerce_float(record.get("unit_cost"), default=0.0)
 
+        record["skipped"] = idx in skipped_set
         record["complete"] = _is_record_complete(record)
         record["missing"] = _missing_fields(record)
         out.append(record)
@@ -488,6 +493,11 @@ def _collect_edits(form, staging: dict) -> dict:
         if row_edits:
             edits[str(idx)] = row_edits
     return edits
+
+
+def _collect_skipped(form, n_rows: int) -> list[int]:
+    """Return indices of rows the user unchecked in the review table."""
+    return [i for i in range(n_rows) if not form.get(f"include_{i}")]
 
 
 def _coerce_int(v, default=1) -> int:
@@ -539,8 +549,12 @@ def _commit_wizard_import(staging: dict) -> tuple[int, int, int]:
     skipped = 0
 
     preview = _build_preview(staging)
+    skipped_rows = set(staging.get("skipped_rows", []))
 
-    for record in preview:
+    for idx, record in enumerate(preview):
+        if idx in skipped_rows:
+            skipped += 1
+            continue
         name = (record.get("name") or "").strip()
         if not name:
             skipped += 1
