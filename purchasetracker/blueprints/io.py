@@ -314,7 +314,12 @@ def wizard_upload():
             return redirect(url_for("io.wizard_upload"))
         try:
             blob = f.read()
-            parsed = import_parsers.parse_upload(f.filename, blob)
+            try:
+                header_row = max(1, int(request.form.get("header_row", 1)))
+            except (TypeError, ValueError):
+                header_row = 1
+            parsed = import_parsers.parse_upload(f.filename, blob,
+                                                 header_row=header_row)
         except Exception as e:
             current_app.logger.exception("Parse failed")
             flash(f"Could not parse file: {e}", "error")

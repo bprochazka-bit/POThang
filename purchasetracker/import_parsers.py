@@ -45,24 +45,30 @@ _KNOWN_HEADER_TOKENS = {
 
 # ---------- public API ----------
 
-def parse_upload(filename: str, blob: bytes) -> dict:
-    """Auto-detect format from filename and parse. Returns dict shape above."""
+def parse_upload(filename: str, blob: bytes, header_row: int = 1) -> dict:
+    """Auto-detect format from filename and parse. Returns dict shape above.
+
+    header_row is 1-based: 1 means the first row (default). Rows before it
+    are discarded. Useful when a spreadsheet has a title or metadata block
+    above the actual column headers.
+    """
+    hr = max(1, header_row)
     ext = (Path(filename).suffix or "").lower().lstrip(".")
     if ext in ("xlsx", "xlsm"):
-        return _parse_xlsx(blob)
+        return _parse_xlsx(blob, header_row=hr)
     if ext == "json":
         return _parse_json(blob)
     if ext == "tsv":
-        return _parse_csv_like(blob, force_delim="\t", fmt="tsv")
+        return _parse_csv_like(blob, force_delim="\t", fmt="tsv", header_row=hr)
     if ext == "csv":
-        return _parse_csv_like(blob, fmt="csv")
+        return _parse_csv_like(blob, fmt="csv", header_row=hr)
     # Fallback: try to sniff from contents.
     sniffed = _sniff_format(blob)
     if sniffed == "json":
         return _parse_json(blob)
     if sniffed == "xlsx":
-        return _parse_xlsx(blob)
-    return _parse_csv_like(blob, fmt=sniffed or "csv")
+        return _parse_xlsx(blob, header_row=hr)
+    return _parse_csv_like(blob, fmt=sniffed or "csv", header_row=hr)
 
 
 def _sniff_format(blob: bytes) -> str:
@@ -85,7 +91,7 @@ def _sniff_format(blob: bytes) -> str:
 # ---------- CSV / TSV ----------
 
 def _parse_csv_like(blob: bytes, force_delim: str | None = None,
-                    fmt: str = "csv") -> dict:
+                    fmt: str = "csv", header_row: int = 1) -> dict:
     text = blob.decode("utf-8-sig", errors="replace")
     delim = force_delim
     if delim is None:
@@ -95,13 +101,19 @@ def _parse_csv_like(blob: bytes, force_delim: str | None = None,
         except csv.Error:
             delim = ","
 
-    reader = csv.reader(io.StringIO(text), delimiter=delim)
-    raw_rows = [r for r in reader if any(cell.strip() for cell in r)]
+    # Read all rows (including blank) so header_row is a true file-row index.
+    all_rows = list(csv.reader(io.StringIO(text), delimiter=delim))
+    # header_row is 1-based; skip everything before it.
+    all_rows = all_rows[header_row - 1:]
+    # Drop blank rows.
+    raw_rows = [r for r in all_rows if any(cell.strip() for cell in r)]
+
     if not raw_rows:
         return {"headers": [], "rows": [], "format": fmt, "had_header_row": False}
 
     first = raw_rows[0]
-    had_header = _looks_like_header(first)
+    # If the user explicitly chose a row > 1, trust it as the header.
+    had_header = True if header_row > 1 else _looks_like_header(first)
     if had_header:
         headers = [_clean_header(c) for c in first]
         body = raw_rows[1:]
@@ -124,11 +136,12 @@ def _parse_csv_like(blob: bytes, force_delim: str | None = None,
 
 # ---------- xlsx ----------
 
-def _parse_xlsx(blob: bytes) -> dict:
+def _parse_xlsx(blob: bytes, header_row: int = 1) -> dict:
     wb = load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
     ws = wb.active
     raw_rows: list[list[str]] = []
-    for row in ws.iter_rows(values_only=True):
+    # min_row is 1-based, matching header_row convention.
+    for row in ws.iter_rows(min_row=header_row, values_only=True):
         cells = ["" if v is None else str(v) for v in row]
         if any(c.strip() for c in cells):
             raw_rows.append(cells)
@@ -139,7 +152,8 @@ def _parse_xlsx(blob: bytes) -> dict:
         return {"headers": [], "rows": [], "format": "xlsx", "had_header_row": False}
 
     first = raw_rows[0]
-    had_header = _looks_like_header(first)
+    # If the user explicitly chose a row > 1, trust it as the header.
+    had_header = True if header_row > 1 else _looks_like_header(first)
     if had_header:
         headers = [_clean_header(c) for c in first]
         body = raw_rows[1:]
