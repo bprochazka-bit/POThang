@@ -284,7 +284,7 @@ def render_xlsx(po_id: int):
     )
 
 
-@bp.route("/<int:po_id>/export.json")
+@bp.route("/<int:po_id>/export/json")
 @login_required
 def export_json(po_id: int):
     """Export this PO and its line items as JSON."""
@@ -303,7 +303,7 @@ def export_json(po_id: int):
     )
 
 
-@bp.route("/<int:po_id>/export.csv")
+@bp.route("/<int:po_id>/export/csv")
 @login_required
 def export_csv(po_id: int):
     """Export the line items of this PO as CSV."""
