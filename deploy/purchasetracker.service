@@ -11,7 +11,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=FLASK_APP=purchasetracker
 
 # Bind to localhost; put nginx / Caddy / Authentik in front for TLS and auth.
-ExecStart=/usr/bin/gunicorn3 \
+ExecStart=/usr/bin/python3 -m gunicorn \
     --workers 2 \
     --bind 127.0.0.1:8137 \
     --access-logfile - \
