@@ -154,6 +154,42 @@ def add_line(po_id: int):
     return redirect(url_for("pos.detail", po_id=po.id))
 
 
+@bp.route("/<int:po_id>/lines/add-all", methods=["POST"])
+@login_required
+def add_all(po_id: int):
+    po = db.session.get(PurchaseOrder, po_id) or abort(404)
+    tag_filter = request.form.get("tag", "").strip()
+
+    q = (
+        db.session.query(Item)
+        .filter(Item.state.in_(["requested", "approved", "ordered", "partial"]))
+    )
+    if tag_filter:
+        q = q.join(Item.tags).filter(Tag.name == tag_filter)
+    available = [i for i in q.order_by(Item.name).all() if i.qty_unallocated > 0]
+    candidates = [i for i in available if i.is_complete]
+
+    if not candidates:
+        flash("No eligible items to add.", "error")
+        return redirect(url_for("pos.detail", po_id=po.id,
+                                **{"tag": tag_filter} if tag_filter else {}))
+
+    added = 0
+    for item in candidates:
+        qty = item.qty_unallocated
+        line = POLine(po_id=po.id, item_id=item.id, qty=qty,
+                      unit_cost=item.unit_cost)
+        db.session.add(line)
+        db.session.flush()
+        recompute_item_state(item)
+        added += 1
+
+    db.session.commit()
+    flash(f"Added {added} item{'' if added == 1 else 's'} to PO.")
+    return redirect(url_for("pos.detail", po_id=po.id,
+                            **{"tag": tag_filter} if tag_filter else {}))
+
+
 @bp.route("/lines/<int:line_id>/delete", methods=["POST"])
 @login_required
 def delete_line(line_id: int):

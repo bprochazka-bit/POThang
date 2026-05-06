@@ -103,9 +103,9 @@
 
   {% if candidate_items %}
   <form method="post" action="{{ url_for('pos.add_line', po_id=po.id) }}" class="inline">
-    <select name="item_id" required>
+    <select name="item_id" id="add-item-select" required>
       {% for it in candidate_items %}
-      <option value="{{ it.id }}">
+      <option value="{{ it.id }}" data-qty="{{ it.qty_unallocated }}">
         {{ it.name }}
         {%- if it.vendor %} - {{ it.vendor }}{% endif %}
         {%- if it.tags %} [{{ it.tags | map(attribute='name') | join(', ') }}]{% endif %}
@@ -113,9 +113,28 @@
       </option>
       {% endfor %}
     </select>
-    <input type="number" name="qty" min="1" value="1" style="width: 5em">
+    <input type="number" name="qty" id="add-item-qty" min="1"
+           value="{{ candidate_items[0].qty_unallocated }}" style="width: 5em">
     <button type="submit">Add line</button>
   </form>
+  <form method="post"
+        action="{{ url_for('pos.add_all', po_id=po.id) }}"
+        style="display:inline; margin-left: 0.5rem;"
+        onsubmit="return confirm('Add all {{ candidate_items | length }} listed item{{ '' if candidate_items | length == 1 else 's' }} to this PO?');">
+    {% if tag_filter %}<input type="hidden" name="tag" value="{{ tag_filter }}">{% endif %}
+    <button type="submit">Add all ({{ candidate_items | length }})</button>
+  </form>
+
+  <script>
+  (function () {
+    var sel = document.getElementById('add-item-select');
+    var qtyInput = document.getElementById('add-item-qty');
+    sel.addEventListener('change', function () {
+      var opt = sel.options[sel.selectedIndex];
+      qtyInput.value = opt.getAttribute('data-qty') || 1;
+    });
+  })();
+  </script>
   {% else %}
   <p><em>
     {% if tag_filter and incomplete_count %}
