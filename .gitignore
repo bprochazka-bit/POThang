@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Flask instance folder (local config + database)
+instance/
+
+# Uploads
+uploads/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
