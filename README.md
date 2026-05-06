@@ -59,6 +59,12 @@ Authentik outpost). See `deploy/purchasetracker.service` and
 `deploy/nginx.conf.example`.
 
 ```
+# 1. Create directories, copy default config, fix ownership:
+sudo bash deploy/setup.sh
+
+# 2. Edit instance/config.py (SECRET_KEY, AUTH_MODE, etc.)
+
+# 3. Install and start the service:
 sudo cp deploy/purchasetracker.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now purchasetracker
