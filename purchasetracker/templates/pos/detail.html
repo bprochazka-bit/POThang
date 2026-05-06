@@ -36,16 +36,23 @@
 <section class="card">
   <h2>Lines</h2>
   {% if po.lines %}
-  <table class="data">
+  <table class="data" id="po-lines-table">
     <thead><tr>
-      <th>#</th><th>Description</th><th>Qty</th><th>Unit</th><th>Line total</th>
-      <th>Received</th><th>Actions</th>
+      <th>#</th>
+      <th data-sort="text">Item</th>
+      <th data-sort="text">Vendor</th>
+      <th data-sort="num">Qty</th>
+      <th data-sort="num">Unit</th>
+      <th data-sort="num">Line total</th>
+      <th data-sort="num">Received</th>
+      <th>Actions</th>
     </tr></thead>
     <tbody>
     {% for line in po.lines %}
-    <tr>
+    <tr data-line="{{ loop.index0 }}">
       <td>{{ loop.index }}</td>
       <td><a href="{{ url_for('items.detail', item_id=line.item_id) }}">{{ line.item.name }}</a></td>
+      <td>{{ line.item.vendor or '' }}</td>
       <td>{{ line.qty }}</td>
       <td>{{ line.unit_cost | currency }}</td>
       <td>{{ line.line_total | currency }}</td>
@@ -62,7 +69,7 @@
       </td>
     </tr>
     {% if line.receipts %}
-    <tr class="subrow"><td></td><td colspan="6">
+    <tr class="subrow" data-subof="{{ loop.index0 }}"><td></td><td colspan="7">
       <small>
       Receipts:
       {% for r in line.receipts %}
@@ -74,6 +81,50 @@
     {% endfor %}
     </tbody>
   </table>
+
+  <script>
+  (function () {
+    var table = document.getElementById('po-lines-table');
+    var ths = table.querySelectorAll('thead th[data-sort]');
+    var sortCol = -1, sortAsc = true;
+
+    ths.forEach(function (th, i) {
+      // Offset by 1 because the first <th> (#) has no data-sort.
+      var colIdx = Array.from(th.parentNode.children).indexOf(th);
+      th.style.cursor = 'pointer';
+      th.addEventListener('click', function () {
+        if (sortCol === colIdx) { sortAsc = !sortAsc; }
+        else { sortCol = colIdx; sortAsc = true; }
+        sortTable(colIdx, th.dataset.sort === 'num', sortAsc);
+        ths.forEach(function (h) { h.textContent = h.textContent.replace(/ [▲▼]$/, ''); });
+        th.textContent += sortAsc ? ' ▲' : ' ▼';
+      });
+    });
+
+    function sortTable(col, numeric, asc) {
+      var tbody = table.tBodies[0];
+      var rows = Array.from(tbody.querySelectorAll('tr[data-line]'));
+
+      rows.sort(function (a, b) {
+        var av = a.children[col].textContent.replace(/[$,]/g, '').trim();
+        var bv = b.children[col].textContent.replace(/[$,]/g, '').trim();
+        var cmp = numeric
+          ? (parseFloat(av) || 0) - (parseFloat(bv) || 0)
+          : av.localeCompare(bv);
+        return asc ? cmp : -cmp;
+      });
+
+      // Re-append each main row followed by its subrow (if any).
+      rows.forEach(function (row) {
+        var idx = row.dataset.line;
+        var sub = tbody.querySelector('tr[data-subof="' + idx + '"]');
+        tbody.appendChild(row);
+        if (sub) tbody.appendChild(sub);
+      });
+    }
+  })();
+  </script>
+
   {% else %}
   <p><em>No lines yet.</em></p>
   {% endif %}
