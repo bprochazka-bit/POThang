@@ -184,6 +184,81 @@ def test_conditional_if_only_no_else(app, db):
     assert "" in values or None in values
 
 
+def _merged_ranges(ws) -> set[str]:
+    return {str(mr) for mr in ws.merged_cells.ranges}
+
+
+def test_merged_cells_in_loop_replicated_per_line(app, db):
+    """Merged cells inside the loop template are replicated for every rendered line."""
+    wb = Workbook()
+    ws = wb.active
+    # Header row with a merge that must survive untouched.
+    ws["A1"] = "Purchase Order"
+    ws.merge_cells("A1:D1")
+    # Loop region: marker, one template row with a merge, close marker.
+    ws["A2"] = "{{#items}}"
+    ws["A3"] = "{{item.name}}"
+    ws.merge_cells("A3:B3")  # merge spans cols A-B in the template row
+    ws["A4"] = "{{/items}}"
+    # Footer merge that must shift down correctly.
+    ws["A5"] = "Total"
+    ws.merge_cells("A5:D5")
+    buf = io.BytesIO()
+    wb.save(buf)
+    tmpl = buf.getvalue()
+
+    item1 = Item(name="Alpha")
+    item2 = Item(name="Beta")
+    db.session.add_all([item1, item2])
+    db.session.flush()
+    po = PurchaseOrder(po_number="PO-MERGE-1", vendor="Acme")
+    db.session.add(po)
+    db.session.flush()
+    db.session.add(POLine(po_id=po.id, item_id=item1.id, qty=1, unit_cost=1.0))
+    db.session.add(POLine(po_id=po.id, item_id=item2.id, qty=1, unit_cost=1.0))
+    db.session.commit()
+
+    rendered = render_po_xlsx(po, tmpl)
+    ws_out = load_workbook(io.BytesIO(rendered)).active
+    ranges = _merged_ranges(ws_out)
+
+    # Header merge must survive.
+    assert "A1:D1" in ranges
+    # Two lines → two A:B merges on rows 2 and 3.
+    assert "A2:B2" in ranges
+    assert "A3:B3" in ranges
+    # Footer was at row 5 in the template; loop expanded by net 0 rows
+    # (deleted 3 rows, inserted 2) so footer lands at row 4.
+    assert "A4:D4" in ranges
+
+
+def test_merged_cells_above_loop_unchanged(app, db):
+    """Merged cells entirely above the loop block are not disturbed."""
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "Header"
+    ws.merge_cells("A1:C1")
+    ws["A2"] = "{{#items}}"
+    ws["A3"] = "{{item.name}}"
+    ws["A4"] = "{{/items}}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    tmpl = buf.getvalue()
+
+    item = Item(name="Widget")
+    db.session.add(item)
+    db.session.flush()
+    po = PurchaseOrder(po_number="PO-MERGE-2", vendor="Acme")
+    db.session.add(po)
+    db.session.flush()
+    db.session.add(POLine(po_id=po.id, item_id=item.id, qty=1, unit_cost=5.0))
+    db.session.commit()
+
+    rendered = render_po_xlsx(po, tmpl)
+    ws_out = load_workbook(io.BytesIO(rendered)).active
+    assert "A1:C1" in _merged_ranges(ws_out)
+
+
 def test_sample_template_renders(app, db):
     """Render against the bundled sample template; must not throw."""
     po = _seed_po(db)

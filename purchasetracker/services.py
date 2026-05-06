@@ -309,14 +309,41 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
     template_rows = list(range(open_row + 1, close_row))
     template_height = len(template_rows)
 
-    # Capture template row data (values + styles) before we mutate the sheet.
+    # --- Snapshot ALL merged ranges before any mutations. ---
+    # openpyxl's insert_rows/delete_rows have well-known bugs that corrupt
+    # merged cell ranges. We take full control: unmerge everything first,
+    # then re-apply adjusted ranges ourselves after the mutations.
+    all_merges = [
+        (mr.min_row, mr.max_row, mr.min_col, mr.max_col)
+        for mr in ws.merged_cells.ranges
+    ]
+    for mr in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(mr))
+
+    # Split merges into two buckets:
+    #   template_merges — fully inside the template rows; replicated per line.
+    #   external_merges — outside the loop block; row-shifted by the net delta.
+    tmpl_start, tmpl_end = open_row + 1, close_row - 1
+    template_merges: list[tuple[int, int, int, int]] = []  # offsets from tmpl_start
+    external_merges: list[tuple[int, int, int, int]] = []
+    for (min_r, max_r, min_c, max_c) in all_merges:
+        if min_r >= tmpl_start and max_r <= tmpl_end:
+            template_merges.append((min_r - tmpl_start, max_r - tmpl_start, min_c, max_c))
+        else:
+            external_merges.append((min_r, max_r, min_c, max_c))
+
+    # Capture template row data (values + styles + row height).
     max_col = ws.max_column
     template = []
     for r in template_rows:
-        row_snapshot = []
+        rd = ws.row_dimensions.get(r)
+        row_snapshot = {
+            "height": rd.height if rd else None,
+            "cells": [],
+        }
         for c in range(1, max_col + 1):
             cell = ws.cell(row=r, column=c)
-            row_snapshot.append({
+            row_snapshot["cells"].append({
                 "value": cell.value,
                 "font": copy(cell.font),
                 "fill": copy(cell.fill),
@@ -330,28 +357,26 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
                    key=lambda l: ((l.item.vendor or "").lower(),
                                   (l.item.name or "").lower()))
 
-    # Strategy:
-    #   1. Delete the loop markers and template rows.
-    #   2. Insert (template_height * len(lines)) rows starting at open_row.
-    #   3. Fill them in, applying the template per line.
-    # openpyxl's insert_rows shifts cells down; we need to be careful with
-    # row counts after each mutation.
-
-    rows_to_remove = (close_row - open_row + 1)  # inclusive of both markers
+    rows_to_remove = close_row - open_row + 1  # inclusive of both markers
     ws.delete_rows(open_row, rows_to_remove)
 
-    if not lines:
-        return  # nothing to render; markers are gone, leave the rest alone
-
     insert_count = template_height * len(lines)
+
+    if not lines:
+        _reapply_external_merges(ws, external_merges, open_row, close_row, -rows_to_remove)
+        return
+
     if insert_count > 0:
         ws.insert_rows(open_row, amount=insert_count)
 
     write_row = open_row
     for idx, line in enumerate(lines):
         ctx = _line_context(line, idx)
+        line_base = write_row
         for tmpl_row in template:
-            for col_idx, src in enumerate(tmpl_row, start=1):
+            if tmpl_row["height"] is not None:
+                ws.row_dimensions[write_row].height = tmpl_row["height"]
+            for col_idx, src in enumerate(tmpl_row["cells"], start=1):
                 cell = ws.cell(row=write_row, column=col_idx)
                 value = src["value"]
                 if isinstance(value, str):
@@ -369,3 +394,37 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
                 cell.alignment = copy(src["alignment"])
                 cell.number_format = src["number_format"]
             write_row += 1
+        for (off_min_r, off_max_r, min_c, max_c) in template_merges:
+            ws.merge_cells(
+                start_row=line_base + off_min_r,
+                end_row=line_base + off_max_r,
+                start_column=min_c,
+                end_column=max_c,
+            )
+
+    delta = insert_count - rows_to_remove
+    _reapply_external_merges(ws, external_merges, open_row, close_row, delta)
+
+
+def _reapply_external_merges(
+    ws: Worksheet,
+    external_merges: list[tuple[int, int, int, int]],
+    open_row: int,
+    close_row: int,
+    delta: int,
+) -> None:
+    """Re-apply merged cell ranges that were outside the loop region.
+
+    Ranges entirely above open_row are unchanged. Ranges that started after
+    close_row are shifted by delta. Ranges that overlapped the loop block
+    itself are silently dropped — they were invalid template constructs.
+    """
+    for (min_r, max_r, min_c, max_c) in external_merges:
+        if max_r < open_row:
+            pass  # entirely above — no adjustment needed
+        elif min_r > close_row:
+            min_r += delta
+            max_r += delta
+        else:
+            continue  # overlapped the loop block — drop it
+        ws.merge_cells(start_row=min_r, end_row=max_r, start_column=min_c, end_column=max_c)
