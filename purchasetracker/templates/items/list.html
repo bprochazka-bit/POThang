@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Items &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>Items</h1>
+
+<form method="get" class="filters">
+  <input type="text" name="q" value="{{ request.args.get('q', '') }}" placeholder="Search name, description, model, sku, notes">
+
+  <select name="state">
+    <option value="">All states</option>
+    {% for s in states %}
+      <option value="{{ s }}" {% if request.args.get('state') == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+
+  <select name="complete" title="Filter by required-fields completeness">
+    <option value="" {% if not completeness %}selected{% endif %}>All items</option>
+    <option value="no" {% if completeness == 'no' %}selected{% endif %}>Incomplete only</option>
+    <option value="yes" {% if completeness == 'yes' %}selected{% endif %}>Complete only</option>
+  </select>
+
+  <select name="tag">
+    <option value="">All tags</option>
+    {% for t in all_tags %}
+      <option value="{{ t }}" {% if request.args.get('tag') == t %}selected{% endif %}>{{ t }}</option>
+    {% endfor %}
+  </select>
+
+  <select name="po">
+    <option value="">All POs</option>
+    {% for n in all_pos %}
+      <option value="{{ n }}" {% if request.args.get('po') == n %}selected{% endif %}>{{ n }}</option>
+    {% endfor %}
+  </select>
+
+  <input type="text" name="vendor" value="{{ request.args.get('vendor', '') }}" placeholder="Vendor">
+  <input type="number" step="0.01" name="cost_min" value="{{ request.args.get('cost_min', '') }}" placeholder="Min cost">
+  <input type="number" step="0.01" name="cost_max" value="{{ request.args.get('cost_max', '') }}" placeholder="Max cost">
+
+  <button type="submit">Filter</button>
+  <a href="{{ url_for('items.list_items') }}">Clear</a>
+  <a href="{{ url_for('items.create') }}" class="btn">Add item</a>
+</form>
+
+{% set incomplete_total = items | rejectattr('is_complete') | list | length %}
+{% if incomplete_total and not completeness %}
+<p class="meta" style="margin-top: -0.5rem;">
+  <strong>{{ incomplete_total }}</strong> of {{ items | length }} item{{ '' if items | length == 1 else 's' }} {{ 'is' if incomplete_total == 1 else 'are' }} missing required fields.
+  <a href="?complete=no">Show only incomplete &rarr;</a>
+</p>
+{% endif %}
+
+<table class="data">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Vendor</th>
+      <th>Qty</th>
+      <th>Unit</th>
+      <th>Total</th>
+      <th>State</th>
+      <th>Tags</th>
+      <th>POs</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in items %}
+    <tr class="{% if not item.is_complete %}row-incomplete{% endif %}">
+      <td>
+        <a href="{{ url_for('items.detail', item_id=item.id) }}">{{ item.name }}</a>
+        {% if not item.is_complete %}
+        <span class="missing-badge" title="Required fields not yet filled in">
+          missing: {{ item.missing_fields | join(', ') }}
+        </span>
+        {% endif %}
+        {% if item.description %}
+          <div class="row-subtitle">{{ item.description | truncate(90) }}</div>
+        {% endif %}
+      </td>
+      <td>{{ item.vendor or '' }}</td>
+      <td>{{ item.qty }}</td>
+      <td>{% if item.unit_cost %}{{ item.unit_cost | currency }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if item.unit_cost %}{{ item.estimated_total | currency }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td><span class="state state-{{ item.state }}">{{ item.state }}</span></td>
+      <td>{{ item.tags | map(attribute='name') | join(', ') }}</td>
+      <td>
+        {% for line in item.lines %}
+          {% if line.po and line.po.status != 'cancelled' %}
+            <a href="{{ url_for('pos.detail', po_id=line.po.id) }}">{{ line.po.po_number }}</a>{% if not loop.last %}, {% endif %}
+          {% endif %}
+        {% endfor %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8"><em>No items match the filters.</em></td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

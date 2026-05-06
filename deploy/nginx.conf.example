@@ -1,0 +1,36 @@
+# Example nginx site config for PurchaseTracker behind Authentik or
+# oauth2-proxy. The proxy validates the user and sets X-Remote-User; we trust
+# that header because the request comes from 127.0.0.1.
+#
+# Set AUTH_MODE = "proxy_header" in instance/config.py.
+
+server {
+    listen 80;
+    server_name purchases.internal.example.org;
+
+    # Strip any X-Remote-* headers from clients before they reach the auth
+    # request - Authentik / oauth2-proxy will set them for real.
+    proxy_set_header X-Remote-User "";
+    proxy_set_header X-Remote-Email "";
+
+    # auth_request to Authentik outpost (or oauth2-proxy /oauth2/auth).
+    location = /outpost.goauthentik.io/auth/nginx {
+        internal;
+        proxy_pass https://authentik.internal.example.org/outpost.goauthentik.io/auth/nginx;
+        proxy_set_header Host $host;
+        proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+    }
+
+    location / {
+        auth_request /outpost.goauthentik.io/auth/nginx;
+        auth_request_set $remote_user $upstream_http_x_authentik_username;
+        auth_request_set $remote_email $upstream_http_x_authentik_email;
+
+        proxy_pass http://127.0.0.1:8137;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Remote-User $remote_user;
+        proxy_set_header X-Remote-Email $remote_email;
+    }
+}

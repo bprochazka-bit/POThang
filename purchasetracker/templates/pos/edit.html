@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{% if po %}Edit{% else %}New{% endif %} PO{% endblock %}
+{% block content %}
+<h1>{% if po %}Edit PO {{ po.po_number }}{% else %}New purchase order{% endif %}</h1>
+
+<form method="post" class="stack">
+  {% if not po %}
+  <label>
+    PO number
+    <input type="text" name="po_number" required maxlength="64">
+  </label>
+  {% endif %}
+
+  <label>
+    Vendor
+    <input type="text" name="vendor" maxlength="128"
+           value="{{ po.vendor if po else '' }}">
+  </label>
+
+  <label>
+    Ship to
+    <input type="text" name="ship_to" maxlength="255"
+           value="{{ po.ship_to if po else '' }}">
+  </label>
+
+  <label>
+    Notes
+    <textarea name="notes" rows="3">{{ po.notes if po else '' }}</textarea>
+  </label>
+
+  {% if po %}
+  <label>
+    Status
+    <select name="status">
+      {% for s in statuses %}
+        <option value="{{ s }}" {% if po.status == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+      {# Show derived statuses (e.g. 'received') as read-only options if the
+         PO happens to be in one, so the dropdown reflects reality. #}
+      {% if po.status not in statuses %}
+        <option value="{{ po.status }}" selected>{{ po.status }} (auto)</option>
+      {% endif %}
+    </select>
+    <small>"received" is set automatically when every line is fully received.</small>
+  </label>
+  {% endif %}
+
+  <div class="actions">
+    <button type="submit" class="btn">Save</button>
+    {% if po %}
+    <a href="{{ url_for('pos.detail', po_id=po.id) }}">Cancel</a>
+    {% else %}
+    <a href="{{ url_for('pos.list_pos') }}">Cancel</a>
+    {% endif %}
+  </div>
+</form>
+{% endblock %}

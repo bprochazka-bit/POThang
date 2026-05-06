@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Authentication required{% endblock %}
+{% block content %}
+<h1>Authentication required</h1>
+<p>This instance is configured for reverse-proxy authentication, but no
+<code>{{ header }}</code> header was received from a trusted proxy.</p>
+<p>Make sure your reverse proxy (Authentik, oauth2-proxy, nginx auth_request,
+etc.) is forwarding the authenticated username in <code>{{ header }}</code>,
+and that <code>TRUSTED_PROXIES</code> in <code>instance/config.py</code>
+includes the proxy's address.</p>
+{% endblock %}

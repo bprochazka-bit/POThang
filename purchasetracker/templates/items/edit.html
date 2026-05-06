@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}{% if item %}Edit{% else %}New{% endif %} item{% endblock %}
+{% block content %}
+<h1>{% if item %}Edit item{% else %}New item{% endif %}</h1>
+
+<form method="post" class="stack">
+  {% if item and item.missing_fields %}
+  <div class="flash flash-error" style="margin-bottom: 0;">
+    Missing required fields: <strong>{{ item.missing_fields | join(', ') }}</strong>.
+    Items can't be added to a purchase order until every required field is filled.
+  </div>
+  {% endif %}
+
+  <label>
+    Name <span style="color: var(--danger);">*</span>
+    <input type="text" name="name" required maxlength="255"
+           placeholder="Short title, e.g. Coleman 8-person tent"
+           value="{{ item.name if item else '' }}">
+  </label>
+
+  <label>
+    Description <span class="req-marker" title="Required to add this item to a PO">*</span>
+    <textarea name="description" rows="3"
+              placeholder="Longer description, specs, what it's for...">{{ item.description if item else '' }}</textarea>
+  </label>
+
+  <div class="row">
+    <label>
+      Vendor <span class="req-marker" title="Required to add this item to a PO">*</span>
+      <input type="text" name="vendor" maxlength="128"
+             value="{{ item.vendor if item else '' }}">
+    </label>
+    <label>
+      Model
+      <input type="text" name="model" maxlength="128"
+             value="{{ item.model if item else '' }}">
+    </label>
+    <label>
+      Vendor SKU
+      <input type="text" name="vendor_sku" maxlength="128"
+             value="{{ item.vendor_sku if item else '' }}">
+    </label>
+  </div>
+
+  <label>
+    URL <span class="req-marker" title="Required to add this item to a PO">*</span>
+    <input type="url" name="url" maxlength="1024"
+           placeholder="https://..."
+           value="{{ item.url if item else '' }}">
+  </label>
+
+  <div class="row">
+    <label>
+      Quantity <span class="req-marker" title="Required to add this item to a PO">*</span>
+      <input type="number" name="qty" min="1" required
+             value="{{ item.qty if item else 1 }}">
+    </label>
+    <label>
+      Estimated unit cost <span class="req-marker" title="Required to add this item to a PO">*</span>
+      <input type="number" name="unit_cost" step="0.01" min="0"
+             placeholder="0.00"
+             value="{{ ('%.2f' % item.unit_cost) if item and item.unit_cost else '' }}">
+    </label>
+  </div>
+
+  <label>
+    Tags (comma separated)
+    <div class="tagbox">
+      <input id="item-tags-input" type="text" name="tags" autocomplete="off"
+             value="{{ item.tags | map(attribute='name') | join(', ') if item else '' }}">
+      <ul id="item-tags-list" class="tagbox-list" hidden></ul>
+    </div>
+  </label>
+  <script id="all-tags" type="application/json">{{ all_tags | tojson }}</script>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      var tags = [];
+      try {
+        tags = JSON.parse(document.getElementById("all-tags").textContent) || [];
+      } catch (e) {}
+      new TagCombobox({
+        input: document.getElementById("item-tags-input"),
+        list: document.getElementById("item-tags-list"),
+        suggestions: tags,
+        multi: true,
+      });
+    });
+  </script>
+
+  <label>
+    Notes
+    <textarea name="notes" rows="4">{{ item.notes if item else '' }}</textarea>
+  </label>
+
+  <div class="actions">
+    <button type="submit" class="btn">Save</button>
+    {% if item %}
+    <a href="{{ url_for('items.detail', item_id=item.id) }}">Cancel</a>
+    {% else %}
+    <a href="{{ url_for('items.list_items') }}">Cancel</a>
+    {% endif %}
+  </div>
+</form>
+{% endblock %}

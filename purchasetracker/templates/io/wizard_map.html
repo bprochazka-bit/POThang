@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Map fields &middot; Import wizard{% endblock %}
+{% block content %}
+<h1>Step 2 &middot; Map fields</h1>
+<p class="meta">
+  Source: <code>{{ staging.original_filename }}</code> ({{ staging.format }},
+  {{ staging.rows | length }} row{{ '' if staging.rows|length == 1 else 's' }})
+  {% if staging.had_header_row %}
+    &middot; Detected header row in the source.
+  {% else %}
+    &middot; No header row detected; columns are labelled <code>Column 1</code> etc.
+  {% endif %}
+</p>
+
+<section class="card">
+  <h2>Source preview <small style="font-weight: normal;">(first 5 rows)</small></h2>
+  <div style="overflow-x: auto;">
+    <table class="data" style="font-size: 0.85rem;">
+      <thead>
+        <tr>{% for h in staging.headers %}<th>{{ h }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+        {% for row in staging.rows[:5] %}
+        <tr>
+          {% for h in staging.headers %}
+          <td>{{ row.get(h, '') | truncate(60) }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<form method="post">
+<section class="card">
+  <h2>Map source columns to PurchaseTracker fields</h2>
+  <p>
+    <small>For each PT field below, pick a source column or set a constant
+      value (e.g. set <code>vendor</code> to "Newegg" for a whole catalog).
+      Auto-guesses are pre-filled where header names matched.</small>
+  </p>
+
+  <table class="data" style="margin-top: 0.5rem;">
+    <thead>
+      <tr>
+        <th style="width: 12rem;">PT field</th>
+        <th>Source column</th>
+        <th>Constant value <small>(used when source column is "Set constant")</small></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for pt_field, label, required in fields %}
+      <tr>
+        <td>
+          <strong>{{ label }}</strong>
+          {% if required %}<span class="req-marker" title="Required for the item to go on a PO">*</span>{% endif %}
+        </td>
+        <td>
+          {% set chosen = current_mapping.get(pt_field, '') %}
+          {% set is_const = pt_field in constants %}
+          <select name="map_{{ pt_field }}" data-pt="{{ pt_field }}" class="map-select">
+            <option value="" {% if not chosen and not is_const %}selected{% endif %}>— not mapped —</option>
+            <option value="__constant__" {% if is_const %}selected{% endif %}>Set constant ↓</option>
+            {% for h in staging.headers %}
+            <option value="{{ h }}" {% if chosen == h and not is_const %}selected{% endif %}>{{ h }}</option>
+            {% endfor %}
+          </select>
+        </td>
+        <td>
+          <input type="text" name="const_{{ pt_field }}" data-pt="{{ pt_field }}"
+                 class="const-input"
+                 value="{{ constants.get(pt_field, '') }}"
+                 placeholder="(only used if column is 'Set constant')"
+                 style="width: 100%; max-width: 24rem;">
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><small>
+    <span class="req-marker">*</span> denotes fields required for an item to be
+    addable to a purchase order. You can still import rows that are missing
+    these &mdash; they'll show as incomplete in the items list and you can fill
+    them in later.
+  </small></p>
+</section>
+
+<div style="display: flex; gap: 0.75rem; align-items: center; margin-bottom: 2rem;">
+  <button type="submit" class="btn">Next: review &amp; edit &rarr;</button>
+  <a href="{{ url_for('io.wizard_upload') }}">Re-upload a different file</a>
+  <span style="flex: 1;"></span>
+  <form method="post" action="{{ url_for('io.wizard_cancel', sid=sid) }}" style="display: inline;">
+    <button type="submit" class="link">Cancel import</button>
+  </form>
+</div>
+</form>
+
+<script>
+// Subtle UX: gray out the constant input when its row's mapping isn't set
+// to "Set constant", just to make the relationship clearer.
+(function () {
+  function refresh() {
+    document.querySelectorAll(".map-select").forEach(function (sel) {
+      var pt = sel.dataset.pt;
+      var input = document.querySelector('.const-input[data-pt="' + pt + '"]');
+      if (!input) return;
+      var active = sel.value === "__constant__";
+      input.style.opacity = active ? "1" : "0.5";
+      input.style.background = active ? "" : "var(--surface-1)";
+    });
+  }
+  document.querySelectorAll(".map-select").forEach(function (sel) {
+    sel.addEventListener("change", refresh);
+  });
+  refresh();
+})();
+</script>
+{% endblock %}

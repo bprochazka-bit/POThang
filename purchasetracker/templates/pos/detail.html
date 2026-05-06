@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}{{ po.po_number }} &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>PO {{ po.po_number }}</h1>
+
+<p class="meta">
+  <span class="state state-{{ po.status }}">{{ po.status }}</span>
+  &middot; {{ po.vendor or '(no vendor)' }}
+  &middot; <strong>{{ po.total | currency }}</strong>
+  &middot; <a href="{{ url_for('pos.edit', po_id=po.id) }}">edit details</a>
+</p>
+
+<section class="card">
+  <h2>Status</h2>
+  <form method="post" action="{{ url_for('pos.edit', po_id=po.id) }}" class="inline">
+    {# Carry the current detail fields through unchanged so the edit handler
+       doesn't blank them out. #}
+    <input type="hidden" name="vendor" value="{{ po.vendor or '' }}">
+    <input type="hidden" name="ship_to" value="{{ po.ship_to or '' }}">
+    <input type="hidden" name="notes" value="{{ po.notes or '' }}">
+    <select name="status">
+      {% for s in statuses %}
+        <option value="{{ s }}" {% if po.status == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+      {% if po.status not in statuses %}
+        <option value="{{ po.status }}" selected>{{ po.status }} (auto)</option>
+      {% endif %}
+    </select>
+    <button type="submit">Set status</button>
+  </form>
+  <p><small>Workflow: <code>draft &rarr; approved &rarr; ordered</code>. The
+  <code>received</code> status is set automatically once every line is fully
+  received. <code>cancelled</code> is terminal.</small></p>
+</section>
+
+<section class="card">
+  <h2>Lines</h2>
+  {% if po.lines %}
+  <table class="data">
+    <thead><tr>
+      <th>#</th><th>Description</th><th>Qty</th><th>Unit</th><th>Line total</th>
+      <th>Received</th><th>Actions</th>
+    </tr></thead>
+    <tbody>
+    {% for line in po.lines %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td><a href="{{ url_for('items.detail', item_id=line.item_id) }}">{{ line.item.name }}</a></td>
+      <td>{{ line.qty }}</td>
+      <td>{{ line.unit_cost | currency }}</td>
+      <td>{{ line.line_total | currency }}</td>
+      <td>{{ line.qty_received }} / {{ line.qty }}</td>
+      <td>
+        <form method="post" action="{{ url_for('pos.receive_line', line_id=line.id) }}" class="inline">
+          <input type="number" name="qty" min="1" max="{{ line.qty }}" value="{{ line.qty - line.qty_received }}" style="width: 5em">
+          <button type="submit">Receive</button>
+        </form>
+        <form method="post" action="{{ url_for('pos.delete_line', line_id=line.id) }}" class="inline"
+              onsubmit="return confirm('Remove this line?');">
+          <button type="submit" class="link">remove</button>
+        </form>
+      </td>
+    </tr>
+    {% if line.receipts %}
+    <tr class="subrow"><td></td><td colspan="6">
+      <small>
+      Receipts:
+      {% for r in line.receipts %}
+      {{ r.qty }} on {{ r.received_at.strftime('%Y-%m-%d') if r.received_at }}{% if r.notes %} ({{ r.notes }}){% endif %}{% if not loop.last %}; {% endif %}
+      {% endfor %}
+      </small>
+    </td></tr>
+    {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p><em>No lines yet.</em></p>
+  {% endif %}
+
+  <h3>Add a line</h3>
+  <form method="get" action="{{ url_for('pos.detail', po_id=po.id) }}" class="inline" style="margin-bottom: 0.6rem;">
+    <label style="color: var(--fg-muted); font-size: 0.85rem;">Filter by tag:</label>
+    <select name="tag" onchange="this.form.submit()">
+      <option value="">All items</option>
+      {% for t in all_tags %}
+        <option value="{{ t }}" {% if tag_filter == t %}selected{% endif %}>{{ t }}</option>
+      {% endfor %}
+    </select>
+    {% if tag_filter %}
+      <a href="{{ url_for('pos.detail', po_id=po.id) }}">clear filter</a>
+    {% endif %}
+  </form>
+
+  {% if incomplete_count %}
+  <p class="meta" style="margin-bottom: 0.5rem;">
+    <span class="missing-badge">{{ incomplete_count }} hidden</span>
+    {{ incomplete_count }} item{{ '' if incomplete_count == 1 else 's' }} matching this filter {{ 'is' if incomplete_count == 1 else 'are' }} missing required fields and can't be added yet.
+    {% set incomp_url = url_for('items.list_items', complete='no') %}{% if tag_filter %}{% set incomp_url = url_for('items.list_items', complete='no', tag=tag_filter) %}{% endif %}
+    <a href="{{ incomp_url }}">Review incomplete items &rarr;</a>
+  </p>
+  {% endif %}
+
+  {% if candidate_items %}
+  <form method="post" action="{{ url_for('pos.add_line', po_id=po.id) }}" class="inline">
+    <select name="item_id" required>
+      {% for it in candidate_items %}
+      <option value="{{ it.id }}">
+        {{ it.name }}
+        {%- if it.vendor %} - {{ it.vendor }}{% endif %}
+        {%- if it.tags %} [{{ it.tags | map(attribute='name') | join(', ') }}]{% endif %}
+        ({{ it.qty_unallocated }} of {{ it.qty }} avail., {{ it.unit_cost | currency }} ea)
+      </option>
+      {% endfor %}
+    </select>
+    <input type="number" name="qty" min="1" value="1" style="width: 5em">
+    <button type="submit">Add line</button>
+  </form>
+  {% else %}
+  <p><em>
+    {% if tag_filter and incomplete_count %}
+      No <em>complete</em> items with tag <code>{{ tag_filter }}</code> are available.
+    {% elif tag_filter %}
+      No items with tag <code>{{ tag_filter }}</code> are available to add.
+    {% elif incomplete_count %}
+      No complete items available. Fill in required fields on existing items first.
+    {% else %}
+      No items available to add. Create some on the
+      <a href="{{ url_for('items.list_items') }}">Items</a> page.
+    {% endif %}
+  </em></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Render from template</h2>
+  <form method="post" action="{{ url_for('pos.render_xlsx', po_id=po.id) }}" enctype="multipart/form-data" class="inline">
+    <input type="file" name="template" accept=".xlsx" required>
+    <button type="submit">Render xlsx</button>
+  </form>
+  <p><small>Upload an xlsx with placeholders like
+    <code>&#123;&#123;po_number&#125;&#125;</code>,
+    <code>&#123;&#123;vendor&#125;&#125;</code>,
+    <code>&#123;&#123;total&#125;&#125;</code>, and an items loop region
+    bounded by <code>&#123;&#123;#items&#125;&#125;</code> and
+    <code>&#123;&#123;/items&#125;&#125;</code>. See
+    <code>sample_template/po_template.xlsx</code> for a working example.</small></p>
+</section>
+
+<section class="card">
+  <h2>Attachments</h2>
+  {% if po.attachments %}
+  <ul>
+    {% for att in po.attachments %}
+    <li>
+      <a href="{{ url_for('attachments.download', att_id=att.id) }}">{{ att.original_filename }}</a>
+      <small>({{ att.kind }})</small>
+      <form method="post" action="{{ url_for('attachments.delete', att_id=att.id) }}" class="inline">
+        <button type="submit" class="link" onclick="return confirm('Delete this attachment?')">delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p><em>No attachments.</em></p>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('attachments.upload') }}" enctype="multipart/form-data" class="inline">
+    <input type="hidden" name="target" value="po">
+    <input type="hidden" name="target_id" value="{{ po.id }}">
+    <select name="kind">
+      <option value="quote">Quote</option>
+      <option value="image">Image</option>
+      <option value="other">Other</option>
+    </select>
+    <input type="file" name="file" required>
+    <button type="submit">Upload</button>
+  </form>
+</section>
+
+<p><a href="{{ url_for('pos.list_pos') }}">&larr; back to POs</a></p>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Import wizard &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>Import wizard</h1>
+<p class="meta">
+  Upload a CSV, TSV, xlsx, or JSON file from a vendor catalog or another tool.
+  We'll detect the headers, suggest a mapping to PurchaseTracker fields, and
+  let you review the result before anything is saved.
+</p>
+
+<section class="card">
+  <h2>1. Upload your file</h2>
+  <form method="post" enctype="multipart/form-data" class="stack">
+    <label>
+      Source file
+      <input type="file" name="file" required
+             accept=".csv,.tsv,.xlsx,.xlsm,.json,text/csv,text/tab-separated-values,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+    </label>
+    <p><small>
+      Accepted formats: <code>.csv</code>, <code>.tsv</code>,
+      <code>.xlsx</code>, and <code>.json</code>. The first row is auto-detected
+      as a header row when possible. CSV delimiters are sniffed automatically.
+    </small></p>
+    <div class="actions">
+      <button type="submit" class="btn">Upload &amp; preview</button>
+      <a href="{{ url_for('io.import_form') }}">Back to import home</a>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>What happens next</h2>
+  <ol class="steps-list">
+    <li><strong>Map fields</strong> &middot; Match each PurchaseTracker field
+      (name, vendor, URL, etc.) to a column in your file.
+      We'll guess based on header names; you confirm or change it.</li>
+    <li><strong>Review &amp; edit</strong> &middot; See exactly how each row
+      will be imported. Fix anything inline. Rows missing required fields are
+      highlighted so you can complete them before committing.</li>
+    <li><strong>Commit</strong> &middot; New items are created; existing items
+      (matched by name + vendor + model) are updated.</li>
+  </ol>
+</section>
+
+<style>
+  .steps-list { padding-left: 1.2rem; }
+  .steps-list li { margin-bottom: 0.4rem; line-height: 1.5; }
+</style>
+{% endblock %}

@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+{% block title %}Quick add &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>Quick add</h1>
+<p class="meta">
+  Set a task tag at the top, then add items rapidly. Fill in vendor, cost, and
+  URLs later by editing each item.
+</p>
+
+<section class="card" id="task-card">
+  <h2>Task</h2>
+  <label style="color: var(--fg-muted); font-size: 0.85rem;">
+    Task tag
+    <div class="tagbox">
+      <input id="task-input" type="text" autocomplete="off"
+             value="{{ initial_tag }}"
+             placeholder="e.g. Camp 2026, Lab refresh, Pack 1151 supplies"
+             style="font-size: 1.1rem;">
+      <ul id="task-list" class="tagbox-list" hidden></ul>
+    </div>
+  </label>
+  <p>
+    <small id="task-status" class="muted"></small>
+  </p>
+</section>
+
+<section class="card" id="add-card" hidden>
+  <h2>Add item</h2>
+  <form id="add-form" class="inline" style="gap: 0.6rem; flex-wrap: wrap;">
+    <input id="desc-input" type="text" name="name" required
+           placeholder="Item name (just the basics — fill in details later)"
+           autocomplete="off"
+           style="flex: 1; min-width: 22rem; font-size: 1rem;">
+    <label style="color: var(--fg-muted); font-size: 0.8rem; display: inline-flex; align-items: center; gap: 0.3rem;">
+      Qty
+      <input id="qty-input" type="number" name="qty" min="1" value="1"
+             style="width: 5em;">
+    </label>
+    <button type="submit" class="btn">Add</button>
+  </form>
+  <p style="margin-top: 0.5rem;">
+    <small><kbd>Enter</kbd> adds the item and returns focus here. Tab through
+    fields to move; Shift+Tab to go back.</small>
+  </p>
+</section>
+
+<section class="card" id="list-card" hidden>
+  <h2>Items with this tag <span id="item-count" class="muted"></span></h2>
+  <table class="data" id="items-table">
+    <thead>
+      <tr>
+        <th>Description</th>
+        <th>Qty</th>
+        <th>Vendor</th>
+        <th>Cost</th>
+        <th>State</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="items-tbody">
+      <!-- rows injected by JS -->
+    </tbody>
+  </table>
+  <p id="empty-state" hidden>
+    <em>No items with this tag yet. Add one above.</em>
+  </p>
+</section>
+
+<style>
+  /* keep small bits of presentation tied to this view */
+  kbd {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 0 0.35em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+    color: var(--fg);
+  }
+  .muted { color: var(--fg-muted); }
+  .row-flash {
+    animation: flash 1.6s ease-out;
+  }
+  @keyframes flash {
+    0%   { background: rgba(93, 211, 158, 0.25); }
+    100% { background: transparent; }
+  }
+  td.actions a {
+    color: var(--fg-muted);
+    margin-right: 0.4rem;
+  }
+  td.actions a:hover { color: var(--fg); }
+</style>
+
+<script id="initial-tags" type="application/json">{{ existing_tags | tojson }}</script>
+
+<script>
+(function () {
+  "use strict";
+
+  const taskInput   = document.getElementById("task-input");
+  const taskListEl  = document.getElementById("task-list");
+  const taskStatus  = document.getElementById("task-status");
+  const addCard     = document.getElementById("add-card");
+  const listCard    = document.getElementById("list-card");
+  const addForm     = document.getElementById("add-form");
+  const descInput   = document.getElementById("desc-input");
+  const qtyInput    = document.getElementById("qty-input");
+  const tbody       = document.getElementById("items-tbody");
+  const emptyState  = document.getElementById("empty-state");
+  const itemCount   = document.getElementById("item-count");
+
+  // Bootstrap tag list from server-rendered JSON. Works without any fetch.
+  let knownTags = [];
+  try {
+    knownTags = JSON.parse(document.getElementById("initial-tags").textContent) || [];
+  } catch (e) { knownTags = []; }
+
+  let currentTag = "";
+
+  // ---------- Helpers ----------
+
+  const escapeHtml = (s) => {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  };
+
+  const fmtCurrency = (n) => {
+    if (n == null) return "";
+    if (n === 0) return "—";
+    return "$" + Number(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  };
+
+  const renderRow = (item) => {
+    const tr = document.createElement("tr");
+    tr.dataset.itemId = item.id;
+    if (!item.is_complete) tr.classList.add("row-incomplete");
+    const missingHtml = (!item.is_complete && item.missing_fields && item.missing_fields.length)
+      ? `<span class="missing-badge">missing: ${escapeHtml(item.missing_fields.join(", "))}</span>`
+      : "";
+    tr.innerHTML = `
+      <td>
+        <a href="${item.detail_url}">${escapeHtml(item.name || item.description || "")}</a>
+        ${missingHtml}
+      </td>
+      <td>${item.qty}</td>
+      <td>${escapeHtml(item.vendor || "")}</td>
+      <td>${item.unit_cost ? fmtCurrency(item.unit_cost) : '<span class="muted">—</span>'}</td>
+      <td><span class="state state-${escapeHtml(item.state)}">${escapeHtml(item.state)}</span></td>
+      <td class="actions">
+        <a href="${item.edit_url}" title="Add details (vendor, cost, URL...)">edit</a>
+      </td>
+    `;
+    return tr;
+  };
+
+  const updateCount = () => {
+    const n = tbody.children.length;
+    itemCount.textContent = n ? `(${n})` : "";
+    emptyState.hidden = n > 0;
+  };
+
+  // ---------- Items list (server) ----------
+
+  const loadItemsForTag = async (tag) => {
+    tbody.innerHTML = "";
+    if (!tag) { updateCount(); return; }
+    try {
+      const url = "{{ url_for('items.api_by_tag') }}?tag=" + encodeURIComponent(tag);
+      const resp = await fetch(url);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      for (const item of data.items) {
+        tbody.appendChild(renderRow(item));
+      }
+      updateCount();
+    } catch (e) {
+      taskStatus.textContent = "Could not load items for this tag.";
+    }
+  };
+
+  // ---------- Tag selection ----------
+
+  const setTag = (tag) => {
+    tag = (tag || "").trim();
+    currentTag = tag;
+    if (!tag) {
+      addCard.hidden = true;
+      listCard.hidden = true;
+      taskStatus.textContent = "Set a task tag above to start adding items.";
+      return;
+    }
+    addCard.hidden = false;
+    listCard.hidden = false;
+    taskStatus.textContent = `Items added below will be tagged "${tag}".`;
+    loadItemsForTag(tag);
+    // Update URL so the page is bookmarkable / refreshable.
+    const url = new URL(window.location);
+    url.searchParams.set("tag", tag);
+    window.history.replaceState({}, "", url);
+    descInput.focus();
+  };
+
+  // Set up the combobox on the task input.
+  const taskCombo = new TagCombobox({
+    input: taskInput,
+    list: taskListEl,
+    suggestions: knownTags,
+    onSelect: (value) => setTag(value),
+  });
+
+  // Also catch a plain blur in case user typed and clicked away without
+  // committing through the combobox keyboard path.
+  taskInput.addEventListener("blur", () => {
+    // Combobox commits on blur via its own handler; this just keeps
+    // setTag() in sync with the resulting input value.
+    setTimeout(() => setTag(taskInput.value), 130);
+  });
+
+  // ---------- Item add ----------
+
+  addForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = descInput.value.trim();
+    if (!name || !currentTag) return;
+
+    const qty = parseInt(qtyInput.value, 10) || 1;
+    const submitBtn = addForm.querySelector("button[type=submit]");
+    submitBtn.disabled = true;
+
+    try {
+      const resp = await fetch("{{ url_for('items.api_quick_add') }}", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          name: name,
+          qty: qty,
+          tag: currentTag,
+        }),
+      });
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        taskStatus.textContent = "Add failed: " + (errBody.error || resp.statusText);
+        return;
+      }
+      const item = await resp.json();
+      const row = renderRow(item);
+      row.classList.add("row-flash");
+      tbody.insertBefore(row, tbody.firstChild);
+      updateCount();
+      taskStatus.textContent = `Added "${item.name}". Keep going.`;
+
+      // If this introduced a new tag, learn it.
+      if (item.tags && item.tags.length) {
+        for (const t of item.tags) {
+          if (knownTags.indexOf(t) === -1) {
+            knownTags.push(t);
+            knownTags.sort();
+          }
+        }
+        taskCombo.setSuggestions(knownTags);
+      }
+
+      descInput.value = "";
+      qtyInput.value = "1";
+      descInput.focus();
+    } catch (err) {
+      taskStatus.textContent = "Add failed: network error.";
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  // ---------- Init ----------
+  if (taskInput.value.trim()) {
+    setTag(taskInput.value);
+  } else {
+    setTag("");
+    taskInput.focus();
+  }
+})();
+</script>
+{% endblock %}

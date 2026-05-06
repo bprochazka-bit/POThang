@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PurchaseTracker{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script defer src="{{ url_for('static', filename='tag-combobox.js') }}"></script>
+</head>
+<body>
+<header>
+  <nav>
+    <a href="{{ url_for('main.index') }}" class="brand">PurchaseTracker</a>
+    <a href="{{ url_for('main.quick_add') }}">Quick Add</a>
+    <a href="{{ url_for('items.list_items') }}">Items</a>
+    <a href="{{ url_for('pos.list_pos') }}">Purchase Orders</a>
+    <a href="{{ url_for('io.import_form') }}">Import / Export</a>
+    {% set u = g.user %}
+    <span class="user">
+      {% if u %}{{ u.name }}{% else %}<a href="{{ url_for('auth.login') }}">Sign in</a>{% endif %}
+    </span>
+  </nav>
+</header>
+
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <ul class="flashes">
+        {% for cat, msg in messages %}
+          <li class="flash flash-{{ cat or 'info' }}">{{ msg }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endwith %}
+
+  {% block content %}{% endblock %}
+</main>
+
+<footer>
+  <small>PurchaseTracker &middot; lightweight purchase tracking</small>
+</footer>
+</body>
+</html>

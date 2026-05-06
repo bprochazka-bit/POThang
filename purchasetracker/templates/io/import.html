@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Import / Export &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>Import / Export</h1>
+
+<section class="card">
+  <h2>Export</h2>
+  <p>
+    <a href="{{ url_for('io.export_json') }}" class="btn">Download JSON (full)</a>
+    <a href="{{ url_for('io.export_csv') }}" class="btn">Download CSV (items only)</a>
+  </p>
+  <p><small>JSON includes items, POs, lines, receipts, and attachment metadata
+  (file blobs are not embedded). CSV is a flat item list suitable for sharing.</small></p>
+</section>
+
+<section class="card" style="background: linear-gradient(135deg, var(--surface-1) 0%, rgba(77,154,255,0.08) 100%); border-color: rgba(77,154,255,0.3);">
+  <h2>Import with mapping wizard</h2>
+  <p style="margin-bottom: 0.4rem;">
+    Bring data in from a vendor catalog, a spreadsheet, or another tool. The
+    wizard previews your file, suggests how its columns map to PurchaseTracker
+    fields, and lets you edit rows inline before committing.
+  </p>
+  <p style="margin-bottom: 0;">
+    Supports CSV, TSV, xlsx, and JSON.
+  </p>
+  <p style="margin-bottom: 0; margin-top: 0.6rem;">
+    <a href="{{ url_for('io.wizard_upload') }}" class="btn">Open import wizard</a>
+  </p>
+</section>
+
+<section class="card">
+  <h2>Direct import (no mapping)</h2>
+  <p><small>For round-tripping a PurchaseTracker JSON or CSV export back into
+  this instance. Field names must already match.</small></p>
+  <form method="post" enctype="multipart/form-data" class="stack">
+    <label>
+      Format
+      <select name="kind">
+        <option value="json">JSON (full PT export)</option>
+        <option value="csv">CSV (PT-format items only)</option>
+      </select>
+    </label>
+    <label>
+      File
+      <input type="file" name="file" required>
+    </label>
+    <button type="submit" class="btn">Import</button>
+  </form>
+  <p><small>Existing items are matched on (name, vendor, model) and updated
+  rather than duplicated. JSON imports also restore POs, lines, and receipts.</small></p>
+</section>
+{% endblock %}

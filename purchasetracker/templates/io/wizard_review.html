@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Review &middot; Import wizard{% endblock %}
+{% block content %}
+<h1>Step 3 &middot; Review &amp; edit</h1>
+
+<section class="card" style="background: linear-gradient(135deg, var(--surface-1) 0%, rgba(77,154,255,0.06) 100%);">
+  <p style="margin: 0;">
+    Source: <code>{{ staging.original_filename }}</code>
+    &middot; {{ total }} row{{ '' if total == 1 else 's' }}
+    &middot; <strong>{{ complete_count }}</strong> complete,
+    <strong>{{ total - complete_count }}</strong> incomplete
+  </p>
+  {% if total - complete_count > 0 %}
+  <p class="meta" style="margin-top: 0.5rem; margin-bottom: 0;">
+    Incomplete rows are highlighted below. You can edit any cell inline. Rows
+    with a missing <code>name</code> will be skipped on commit; other rows
+    import as-is and show up as incomplete in the items list (still useful
+    while you're sourcing details).
+  </p>
+  {% endif %}
+</section>
+
+<form method="post" id="review-form">
+<input type="hidden" name="mode" value="commit" id="mode-input">
+
+<section class="card">
+  <h2>Mapped rows</h2>
+  <div style="overflow-x: auto;">
+  <table class="data" style="font-size: 0.85rem;">
+    <thead>
+      <tr>
+        <th>#</th>
+        {% for pt_field, label, required in fields %}
+          {% if pt_field != "state" %}
+          <th>{{ label }}{% if required %} <span class="req-marker">*</span>{% endif %}</th>
+          {% endif %}
+        {% endfor %}
+        <th>Missing</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in preview %}
+      {% set row_idx = loop.index0 %}
+      <tr class="{% if not row.complete %}row-incomplete{% endif %}">
+        <td>{{ loop.index }}</td>
+        {% for pt_field, label, required in fields %}
+          {% if pt_field != "state" %}
+          <td>
+            {% if pt_field == "qty" %}
+              <input type="number" min="1"
+                     name="edit_{{ row_idx }}_{{ pt_field }}"
+                     value="{{ row[pt_field] }}"
+                     style="width: 5em;">
+            {% elif pt_field == "unit_cost" %}
+              <input type="number" step="0.01" min="0"
+                     name="edit_{{ row_idx }}_{{ pt_field }}"
+                     value="{{ row[pt_field] }}"
+                     style="width: 7em;">
+            {% else %}
+              <input type="text"
+                     name="edit_{{ row_idx }}_{{ pt_field }}"
+                     value="{{ row[pt_field] }}"
+                     style="width: 100%; min-width: 8em;">
+            {% endif %}
+          </td>
+          {% endif %}
+        {% endfor %}
+        <td>
+          {% if row.missing %}
+          <span class="missing-badge">{{ row.missing | join(', ') }}</span>
+          {% else %}
+          <span style="color: var(--success);">✓</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<div style="display: flex; gap: 0.75rem; align-items: center; margin-bottom: 2rem; flex-wrap: wrap;">
+  <button type="submit" class="btn"
+          onclick="document.getElementById('mode-input').value='commit';">
+    Import {{ total }} row{{ '' if total == 1 else 's' }}
+  </button>
+  <button type="submit"
+          onclick="document.getElementById('mode-input').value='save_edits';">
+    Save edits without importing
+  </button>
+  <a href="{{ url_for('io.wizard_map', sid=sid) }}">&larr; Back to mapping</a>
+  <span style="flex: 1;"></span>
+  <button type="submit" formaction="{{ url_for('io.wizard_cancel', sid=sid) }}"
+          formmethod="post" formnovalidate
+          class="link">Cancel import</button>
+</div>
+</form>
+{% endblock %}

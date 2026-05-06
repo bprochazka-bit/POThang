@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Dashboard &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if incomplete_count %}
+<section class="card" style="border-color: rgba(240, 182, 107, 0.35); background: rgba(240, 182, 107, 0.08);">
+  <h2 style="margin-bottom: 0.4rem;">
+    <span class="missing-badge">{{ incomplete_count }}</span>
+    item{{ '' if incomplete_count == 1 else 's' }} missing required fields
+  </h2>
+  <p class="meta" style="margin-top: 0;">
+    These items can't be added to a purchase order yet — they need name, description, vendor, URL, qty, and price.
+  </p>
+  <p style="margin-bottom: 0;">
+    <a href="{{ url_for('items.list_items', complete='no') }}" class="btn">Review incomplete items</a>
+  </p>
+</section>
+{% endif %}
+
+<section class="card" style="background: linear-gradient(135deg, var(--surface-1) 0%, rgba(77,154,255,0.08) 100%); border-color: rgba(77,154,255,0.3);">
+  <h2 style="margin-bottom: 0.4rem;">Quick add</h2>
+  <p class="meta" style="margin-top: 0;">
+    Got a new task or shopping list? Add stub items rapidly with just a
+    description, then fill in vendor, cost, and links later.
+  </p>
+  <p style="margin-bottom: 0;">
+    <a href="{{ url_for('main.quick_add') }}" class="btn">Open quick add</a>
+  </p>
+</section>
+
+<section class="cards">
+  <div class="card">
+    <h2>Items by state</h2>
+    <table class="kv">
+      {% for state, count in counts_by_state.items() %}
+      <tr>
+        <td><a href="{{ url_for('items.list_items', state=state) }}">{{ state }}</a></td>
+        <td>{{ count }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="2"><em>No items yet.</em></td></tr>
+      {% endfor %}
+    </table>
+    <p><a href="{{ url_for('items.create') }}" class="btn">Add item</a></p>
+  </div>
+
+  <div class="card">
+    <h2>Open purchase orders</h2>
+    {% if open_pos %}
+    <table class="kv">
+      {% for po in open_pos %}
+      <tr>
+        <td><a href="{{ url_for('pos.detail', po_id=po.id) }}">{{ po.po_number }}</a></td>
+        <td>{{ po.vendor or '' }}</td>
+        <td>{{ po.total | currency }}</td>
+        <td>{{ po.status }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    <p><strong>Total open: {{ open_value | currency }}</strong></p>
+    {% else %}
+    <p><em>No open POs.</em></p>
+    {% endif %}
+    <p><a href="{{ url_for('pos.create') }}" class="btn">New PO</a></p>
+  </div>
+</section>
+{% endblock %}

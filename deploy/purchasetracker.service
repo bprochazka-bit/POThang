@@ -1,0 +1,32 @@
+[Unit]
+Description=PurchaseTracker - lightweight purchase order tracking
+After=network.target
+
+[Service]
+# Adjust User, Group, and WorkingDirectory for your install location.
+User=purchasetracker
+Group=purchasetracker
+WorkingDirectory=/srv/purchasetracker
+Environment=PYTHONUNBUFFERED=1
+Environment=FLASK_APP=purchasetracker
+
+# Bind to localhost; put nginx / Caddy / Authentik in front for TLS and auth.
+ExecStart=/usr/bin/gunicorn \
+    --workers 2 \
+    --bind 127.0.0.1:8137 \
+    --access-logfile - \
+    --error-logfile - \
+    "purchasetracker:create_app()"
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/purchasetracker/instance /srv/purchasetracker/uploads
+
+[Install]
+WantedBy=multi-user.target

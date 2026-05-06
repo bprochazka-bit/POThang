@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Purchase Orders &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>Purchase Orders</h1>
+
+<form method="get" class="filters">
+  <select name="status">
+    <option value="">All</option>
+    {% for s in statuses %}
+      <option value="{{ s }}" {% if status == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Filter</button>
+  <a href="{{ url_for('pos.list_pos') }}">Clear</a>
+  <a href="{{ url_for('pos.create') }}" class="btn">New PO</a>
+</form>
+
+<table class="data">
+  <thead><tr>
+    <th>PO #</th><th>Vendor</th><th>Status</th><th>Lines</th><th>Total</th><th>Ordered</th>
+  </tr></thead>
+  <tbody>
+    {% for po in pos %}
+    <tr>
+      <td><a href="{{ url_for('pos.detail', po_id=po.id) }}">{{ po.po_number }}</a></td>
+      <td>{{ po.vendor or '' }}</td>
+      <td>{{ po.status }}</td>
+      <td>{{ po.lines | length }}</td>
+      <td>{{ po.total | currency }}</td>
+      <td>{{ po.ordered_at.strftime('%Y-%m-%d') if po.ordered_at else '' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6"><em>No POs.</em></td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
