@@ -21,6 +21,7 @@
 
   <select name="tag">
     <option value="">All tags</option>
+    <option value="__none__" {% if request.args.get('tag') == '__none__' %}selected{% endif %}>— No tag —</option>
     {% for t in all_tags %}
       <option value="{{ t }}" {% if request.args.get('tag') == t %}selected{% endif %}>{{ t }}</option>
     {% endfor %}
@@ -28,6 +29,7 @@
 
   <select name="po">
     <option value="">All POs</option>
+    <option value="__none__" {% if request.args.get('po') == '__none__' %}selected{% endif %}>— No PO —</option>
     {% for n in all_pos %}
       <option value="{{ n }}" {% if request.args.get('po') == n %}selected{% endif %}>{{ n }}</option>
     {% endfor %}

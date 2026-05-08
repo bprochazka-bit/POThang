@@ -9,7 +9,7 @@ from sqlalchemy import or_
 
 from ..auth import current_user, login_required
 from ..extensions import db
-from ..models import Item, PurchaseOrder, Tag
+from ..models import Item, POLine, PurchaseOrder, Tag
 from ..services import apply_tags, get_or_create_tag, recompute_item_state, set_item_state
 
 bp = Blueprint("items", __name__)
@@ -29,7 +29,9 @@ def list_items():
         q = q.filter(Item.vendor.ilike(f"%{vendor}%"))
 
     tag = request.args.get("tag", "").strip()
-    if tag:
+    if tag == "__none__":
+        q = q.filter(~Item.tags.any())
+    elif tag:
         q = q.join(Item.tags).filter(Tag.name == tag)
 
     cost_min = request.args.get("cost_min")
@@ -46,7 +48,15 @@ def list_items():
             pass
 
     po_number = request.args.get("po", "").strip()
-    if po_number:
+    if po_number == "__none__":
+        active_po_item_ids = (
+            db.session.query(POLine.item_id)
+            .join(PurchaseOrder)
+            .filter(PurchaseOrder.status != "cancelled")
+            .subquery()
+        )
+        q = q.filter(~Item.id.in_(active_po_item_ids))
+    elif po_number:
         q = q.join(Item.lines).join(PurchaseOrder).filter(
             PurchaseOrder.po_number == po_number
         )
