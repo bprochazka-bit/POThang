@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Receiving &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>Receiving</h1>
+
+<form method="get" action="{{ url_for('pos.receiving_index') }}" class="filters">
+  <label style="color: var(--fg-muted); font-size: 0.85rem;">Pick a PO:</label>
+  <select name="po_id" onchange="this.form.submit()">
+    <option value="">— select —</option>
+    {% for p in pos %}
+      {% set outstanding = p.lines | sum(attribute='qty') - p.lines | sum(attribute='qty_received') %}
+      <option value="{{ p.id }}" {% if selected_po and selected_po.id == p.id %}selected{% endif %}>
+        {{ p.po_number }}
+        {%- if p.vendor %} - {{ p.vendor }}{% endif %}
+        ({{ outstanding }} outstanding)
+      </option>
+    {% endfor %}
+  </select>
+  {% if selected_po %}
+    <a href="{{ url_for('pos.receiving_index') }}">clear</a>
+  {% endif %}
+  <noscript><button type="submit">Load</button></noscript>
+</form>
+
+{% if not pos %}
+<section class="card">
+  <p><em>No POs with outstanding receipts. POs become receivable once they
+  reach the <code>approved</code>, <code>ordered</code>, or <code>partial</code>
+  status and have at least one line not yet fully received.</em></p>
+</section>
+{% endif %}
+
+{% if selected_po %}
+{% set po = selected_po %}
+<section class="card">
+  <h2>
+    <a href="{{ url_for('pos.detail', po_id=po.id) }}">PO {{ po.po_number }}</a>
+    <span class="state state-{{ po.status }}" style="margin-left: 0.5rem;">{{ po.status }}</span>
+  </h2>
+  <p class="meta">
+    {{ po.vendor or '(no vendor)' }}
+    &middot; {{ po.lines | length }} line{{ '' if po.lines|length == 1 else 's' }}
+    &middot; <strong>{{ po.total | currency }}</strong>
+  </p>
+
+  {% set ns = namespace(any_outstanding=false, fully_received=[]) %}
+  {% for line in po.lines %}
+    {% if line.qty - line.qty_received > 0 %}
+      {% set ns.any_outstanding = true %}
+    {% else %}
+      {% set ns.fully_received = ns.fully_received + [line] %}
+    {% endif %}
+  {% endfor %}
+
+  {% if ns.any_outstanding %}
+  <form method="post" action="{{ url_for('pos.receiving_receive', po_id=po.id) }}">
+    <table class="data">
+      <thead><tr>
+        <th>Item</th>
+        <th>Vendor</th>
+        <th>Ordered</th>
+        <th>Already received</th>
+        <th>Outstanding</th>
+        <th>Receive now</th>
+      </tr></thead>
+      <tbody>
+        {% for line in po.lines %}
+          {% set outstanding = line.qty - line.qty_received %}
+          {% if outstanding > 0 %}
+          <tr>
+            <td><a href="{{ url_for('items.detail', item_id=line.item_id) }}">{{ line.item.name if line.item else '(unknown)' }}</a></td>
+            <td>{{ line.item.vendor if line.item else '' }}</td>
+            <td>{{ line.qty }}</td>
+            <td>{{ line.qty_received }}</td>
+            <td><strong>{{ outstanding }}</strong></td>
+            <td>
+              <input type="number" name="qty_{{ line.id }}" min="0" max="{{ outstanding }}"
+                     value="0" style="width: 5em" data-outstanding="{{ outstanding }}">
+            </td>
+          </tr>
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div style="margin-top: 0.9rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+      <button type="button" id="receiving-fill-all">Fill all to outstanding</button>
+      <button type="button" id="receiving-clear-all">Clear all</button>
+      <label style="color: var(--fg-muted); font-size: 0.85rem;">
+        Note (optional, applied to all receipts):
+        <input type="text" name="notes" maxlength="255" style="width: 18em; margin-left: 0.4rem;">
+      </label>
+      <button type="submit" class="btn">Receive</button>
+    </div>
+  </form>
+
+  <script>
+  (function () {
+    var fill = document.getElementById('receiving-fill-all');
+    var clear = document.getElementById('receiving-clear-all');
+    var inputs = document.querySelectorAll('input[name^="qty_"]');
+    if (fill) fill.addEventListener('click', function () {
+      inputs.forEach(function (i) { i.value = i.dataset.outstanding || 0; });
+    });
+    if (clear) clear.addEventListener('click', function () {
+      inputs.forEach(function (i) { i.value = 0; });
+    });
+  })();
+  </script>
+
+  {% else %}
+  <p><em>This PO is fully received. Nothing outstanding.</em></p>
+  {% endif %}
+
+  {% if ns.fully_received %}
+  <h3>Already fully received</h3>
+  <table class="data">
+    <thead><tr><th>Item</th><th>Qty</th></tr></thead>
+    <tbody>
+      {% for line in ns.fully_received %}
+      <tr>
+        <td>{{ line.item.name if line.item else '(unknown)' }}</td>
+        <td>{{ line.qty_received }} / {{ line.qty }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
+{% endblock %}

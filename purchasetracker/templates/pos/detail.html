@@ -10,6 +10,10 @@
   &middot; <a href="{{ url_for('pos.edit', po_id=po.id) }}">edit details</a>
 </p>
 
+<div class="po-layout">
+
+<aside class="po-sidebar">
+
 <section class="card">
   <h2>Status</h2>
   <form method="post" action="{{ url_for('pos.edit', po_id=po.id) }}" class="inline">
@@ -26,12 +30,101 @@
         <option value="{{ po.status }}" selected>{{ po.status }} (auto)</option>
       {% endif %}
     </select>
-    <button type="submit">Set status</button>
+    <button type="submit">Set</button>
   </form>
-  <p><small>Workflow: <code>draft &rarr; approved &rarr; ordered</code>. The
-  <code>received</code> status is set automatically once every line is fully
+  <p><small>Workflow: <code>draft &rarr; approved &rarr; ordered</code>.
+  <code>received</code> is set automatically once every line is fully
   received. <code>cancelled</code> is terminal.</small></p>
 </section>
+
+<section class="card">
+  <h2>Render from template</h2>
+  <form method="post" action="{{ url_for('pos.render_xlsx', po_id=po.id) }}"
+        enctype="multipart/form-data" id="render-form">
+    {% if po_templates %}
+    <select name="template_name" id="tpl-select" style="width: 100%; margin-bottom: 0.4rem;">
+      {% for t in po_templates %}
+      <option value="{{ t }}">{{ t }}</option>
+      {% endfor %}
+      <option value="__upload__">Upload custom template…</option>
+    </select>
+    {% endif %}
+    <span id="tpl-upload-area"{% if po_templates %} style="display:none"{% endif %}>
+      <input type="file" name="template" accept=".xlsx" style="width: 100%; margin-bottom: 0.4rem;"
+             {% if not po_templates %}required{% endif %}>
+    </span>
+    <button type="submit" class="btn">Render xlsx</button>
+  </form>
+  <p><small>
+    {% if po_templates %}
+    Pick a saved template, or choose &ldquo;Upload custom template&rdquo;.
+    {% else %}
+    Upload an xlsx template file.
+    {% endif %}
+    Placeholders: <code>&#123;&#123;po_number&#125;&#125;</code>,
+    <code>&#123;&#123;vendor&#125;&#125;</code>,
+    <code>&#123;&#123;total&#125;&#125;</code>, plus an items loop region
+    bounded by <code>&#123;&#123;#items&#125;&#125;</code> /
+    <code>&#123;&#123;/items&#125;&#125;</code>.
+  </small></p>
+  <script>
+  (function () {
+    var sel = document.getElementById('tpl-select');
+    if (!sel) return;
+    var area = document.getElementById('tpl-upload-area');
+    sel.addEventListener('change', function () {
+      var show = sel.value === '__upload__';
+      area.style.display = show ? '' : 'none';
+      area.querySelector('input[type=file]').required = show;
+    });
+  })();
+  </script>
+</section>
+
+<section class="card">
+  <h2>Export</h2>
+  <p>
+    <a href="{{ url_for('pos.export_csv', po_id=po.id) }}">Download CSV</a>
+    &middot;
+    <a href="{{ url_for('pos.export_json', po_id=po.id) }}">Download JSON</a>
+  </p>
+  <p><small>CSV: one row per line item. JSON: full PO + line details.</small></p>
+</section>
+
+<section class="card">
+  <h2>Attachments</h2>
+  {% if po.attachments %}
+  <ul style="padding-left: 1.1rem; margin: 0.3rem 0 0.6rem;">
+    {% for att in po.attachments %}
+    <li>
+      <a href="{{ url_for('attachments.download', att_id=att.id) }}">{{ att.original_filename }}</a>
+      <small>({{ att.kind }})</small>
+      <form method="post" action="{{ url_for('attachments.delete', att_id=att.id) }}" class="inline">
+        <button type="submit" class="link" onclick="return confirm('Delete this attachment?')">delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p><em>No attachments.</em></p>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('attachments.upload') }}" enctype="multipart/form-data">
+    <input type="hidden" name="target" value="po">
+    <input type="hidden" name="target_id" value="{{ po.id }}">
+    <select name="kind" style="width: 100%; margin-bottom: 0.4rem;">
+      <option value="quote">Quote</option>
+      <option value="image">Image</option>
+      <option value="other">Other</option>
+    </select>
+    <input type="file" name="file" required style="width: 100%; margin-bottom: 0.4rem;">
+    <button type="submit">Upload</button>
+  </form>
+</section>
+
+</aside>
+
+<div class="po-main">
 
 <section class="card">
   <h2>Lines</h2>
@@ -53,14 +146,22 @@
       <td>{{ loop.index }}</td>
       <td><a href="{{ url_for('items.detail', item_id=line.item_id) }}">{{ line.item.name }}</a></td>
       <td>{{ line.item.vendor or '' }}</td>
-      <td>{{ line.qty }}</td>
+      <td>
+        <form method="post" action="{{ url_for('pos.update_line_qty', line_id=line.id) }}" class="inline">
+          <input type="number" name="qty" min="{{ line.qty_received if line.qty_received > 0 else 1 }}"
+                 value="{{ line.qty }}" style="width: 4.5em">
+          <button type="submit" title="Update qty">↺</button>
+        </form>
+      </td>
       <td>{{ line.unit_cost | currency }}</td>
       <td>{{ line.line_total | currency }}</td>
       <td>{{ line.qty_received }} / {{ line.qty }}</td>
       <td>
         <form method="post" action="{{ url_for('pos.receive_line', line_id=line.id) }}" class="inline">
-          <input type="number" name="qty" min="1" max="{{ line.qty }}" value="{{ line.qty - line.qty_received }}" style="width: 5em">
-          <button type="submit">Receive</button>
+          <input type="number" name="qty" min="1" max="{{ line.qty - line.qty_received }}"
+                 value="{{ line.qty - line.qty_received }}" style="width: 5em"
+                 {% if line.qty - line.qty_received <= 0 %}disabled{% endif %}>
+          <button type="submit" {% if line.qty - line.qty_received <= 0 %}disabled{% endif %}>Receive</button>
         </form>
         <form method="post" action="{{ url_for('pos.delete_line', line_id=line.id) }}" class="inline"
               onsubmit="return confirm('Remove this line?');">
@@ -106,8 +207,12 @@
       var rows = Array.from(tbody.querySelectorAll('tr[data-line]'));
 
       rows.sort(function (a, b) {
-        var av = a.children[col].textContent.replace(/[$,]/g, '').trim();
-        var bv = b.children[col].textContent.replace(/[$,]/g, '').trim();
+        // Prefer the value of any input the cell contains over textContent,
+        // so the qty column (which is now an editable input) sorts correctly.
+        var aInput = a.children[col].querySelector('input');
+        var bInput = b.children[col].querySelector('input');
+        var av = (aInput ? aInput.value : a.children[col].textContent).replace(/[$,]/g, '').trim();
+        var bv = (bInput ? bInput.value : b.children[col].textContent).replace(/[$,]/g, '').trim();
         var cmp = numeric
           ? (parseFloat(av) || 0) - (parseFloat(bv) || 0)
           : av.localeCompare(bv);
@@ -175,6 +280,7 @@
     {% if tag_filter %}<input type="hidden" name="tag" value="{{ tag_filter }}">{% endif %}
     <button type="submit">Add all ({{ candidate_items | length }})</button>
   </form>
+  <p><small>Adding an item that's already on this PO merges into the existing line.</small></p>
 
   <script>
   (function () {
@@ -202,91 +308,8 @@
   {% endif %}
 </section>
 
-<section class="card">
-  <h2>Render from template</h2>
-  <form method="post" action="{{ url_for('pos.render_xlsx', po_id=po.id) }}"
-        enctype="multipart/form-data" class="inline" id="render-form">
-    {% if po_templates %}
-    <select name="template_name" id="tpl-select">
-      {% for t in po_templates %}
-      <option value="{{ t }}">{{ t }}</option>
-      {% endfor %}
-      <option value="__upload__">Upload custom template…</option>
-    </select>
-    {% endif %}
-    <span id="tpl-upload-area"{% if po_templates %} style="display:none"{% endif %}>
-      <input type="file" name="template" accept=".xlsx"
-             {% if not po_templates %}required{% endif %}>
-    </span>
-    <button type="submit">Render xlsx</button>
-  </form>
-  <p><small>
-    {% if po_templates %}
-    Select a saved template from the <code>po_templates/</code> folder, or
-    choose &ldquo;Upload custom template&rdquo; to use a one-off file.
-    {% else %}
-    Upload an xlsx template file.
-    {% endif %}
-    Supported placeholders: <code>&#123;&#123;po_number&#125;&#125;</code>,
-    <code>&#123;&#123;vendor&#125;&#125;</code>,
-    <code>&#123;&#123;total&#125;&#125;</code>, and an items loop region
-    bounded by <code>&#123;&#123;#items&#125;&#125;</code> /
-    <code>&#123;&#123;/items&#125;&#125;</code>.
-  </small></p>
-  <script>
-  (function () {
-    var sel = document.getElementById('tpl-select');
-    if (!sel) return;
-    var area = document.getElementById('tpl-upload-area');
-    sel.addEventListener('change', function () {
-      var show = sel.value === '__upload__';
-      area.style.display = show ? '' : 'none';
-      area.querySelector('input[type=file]').required = show;
-    });
-  })();
-  </script>
-</section>
-
-<section class="card">
-  <h2>Export</h2>
-  <p>
-    <a href="{{ url_for('pos.export_csv', po_id=po.id) }}">Download CSV</a>
-    &middot;
-    <a href="{{ url_for('pos.export_json', po_id=po.id) }}">Download JSON</a>
-  </p>
-  <p><small>CSV contains one row per line item. JSON includes full PO and line details.</small></p>
-</section>
-
-<section class="card">
-  <h2>Attachments</h2>
-  {% if po.attachments %}
-  <ul>
-    {% for att in po.attachments %}
-    <li>
-      <a href="{{ url_for('attachments.download', att_id=att.id) }}">{{ att.original_filename }}</a>
-      <small>({{ att.kind }})</small>
-      <form method="post" action="{{ url_for('attachments.delete', att_id=att.id) }}" class="inline">
-        <button type="submit" class="link" onclick="return confirm('Delete this attachment?')">delete</button>
-      </form>
-    </li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p><em>No attachments.</em></p>
-  {% endif %}
-
-  <form method="post" action="{{ url_for('attachments.upload') }}" enctype="multipart/form-data" class="inline">
-    <input type="hidden" name="target" value="po">
-    <input type="hidden" name="target_id" value="{{ po.id }}">
-    <select name="kind">
-      <option value="quote">Quote</option>
-      <option value="image">Image</option>
-      <option value="other">Other</option>
-    </select>
-    <input type="file" name="file" required>
-    <button type="submit">Upload</button>
-  </form>
-</section>
+</div>
+</div>
 
 <p><a href="{{ url_for('pos.list_pos') }}">&larr; back to POs</a></p>
 {% endblock %}

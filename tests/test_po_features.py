@@ -140,3 +140,163 @@ def test_tag_filter_no_matches_shows_empty_state(client, db):
     resp = client.get(f"/pos/{po.id}?tag=nonexistent")
     body = resp.data.decode()
     assert "No items with tag" in body
+
+
+# ---------- Add-line merge: duplicates collapse onto an existing line ----------
+
+def _seed_one_complete_item(db, qty=5):
+    item = Item(name="Bolt", description="M5x10", qty=qty, unit_cost=0.10,
+                vendor="McMaster", url="http://mc.example/b")
+    db.session.add(item)
+    db.session.flush()
+    po = PurchaseOrder(po_number="PO-MERGE")
+    db.session.add(po)
+    db.session.commit()
+    return item, po
+
+
+def test_add_duplicate_item_merges_into_existing_line(client, db):
+    item, po = _seed_one_complete_item(db, qty=5)
+
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "2"},
+                follow_redirects=True)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "3"},
+                follow_redirects=True)
+
+    lines = db.session.query(POLine).filter_by(po_id=po.id).all()
+    assert len(lines) == 1, "duplicate add should merge, not create a new row"
+    assert lines[0].qty == 5
+
+
+# ---------- Edit qty on an existing line ----------
+
+def test_update_line_qty_increases(client, db):
+    item, po = _seed_one_complete_item(db, qty=10)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "2"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+    client.post(f"/pos/lines/{line.id}/qty",
+                data={"qty": "7"}, follow_redirects=True)
+    db.session.refresh(line)
+    assert line.qty == 7
+
+
+def test_update_line_qty_below_received_is_rejected(client, db):
+    item, po = _seed_one_complete_item(db, qty=10)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "5"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+    # Receive 3
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "3"}, follow_redirects=True)
+    # Try to drop below 3
+    resp = client.post(f"/pos/lines/{line.id}/qty",
+                       data={"qty": "2"}, follow_redirects=True)
+    assert b"already received" in resp.data
+    db.session.refresh(line)
+    assert line.qty == 5
+
+
+def test_update_line_qty_over_item_pool_is_rejected(client, db):
+    item, po = _seed_one_complete_item(db, qty=4)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "2"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+    resp = client.post(f"/pos/lines/{line.id}/qty",
+                       data={"qty": "99"}, follow_redirects=True)
+    assert b"available" in resp.data
+    db.session.refresh(line)
+    assert line.qty == 2
+
+
+# ---------- Receiving page ----------
+
+def test_receiving_index_lists_pos_with_outstanding(client, db):
+    item, po = _seed_one_complete_item(db, qty=5)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "5"},
+                follow_redirects=True)
+    # Move PO to ordered so it shows up in receiving.
+    client.post(f"/pos/{po.id}/edit",
+                data={"vendor": "", "ship_to": "", "notes": "",
+                      "status": "ordered"},
+                follow_redirects=True)
+
+    resp = client.get("/pos/receiving/")
+    assert resp.status_code == 200
+    assert b"PO-MERGE" in resp.data
+
+
+def test_receiving_excludes_draft_pos(client, db):
+    item, po = _seed_one_complete_item(db, qty=5)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "5"},
+                follow_redirects=True)
+    # Leave PO as draft.
+    resp = client.get("/pos/receiving/")
+    assert resp.status_code == 200
+    assert b"PO-MERGE" not in resp.data
+
+
+def test_receiving_batch_receive_records_receipts(client, db):
+    item, po = _seed_one_complete_item(db, qty=5)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "5"},
+                follow_redirects=True)
+    client.post(f"/pos/{po.id}/edit",
+                data={"vendor": "", "ship_to": "", "notes": "",
+                      "status": "ordered"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+
+    resp = client.post(f"/pos/receiving/{po.id}/receive",
+                       data={f"qty_{line.id}": "3", "notes": "Box A"},
+                       follow_redirects=True)
+    assert resp.status_code == 200
+    db.session.refresh(line)
+    assert line.qty_received == 3
+    receipts = db.session.query(Receipt).filter_by(line_id=line.id).all()
+    assert len(receipts) == 1
+    assert receipts[0].notes == "Box A"
+
+
+def test_receiving_full_qty_marks_po_received(client, db):
+    item, po = _seed_one_complete_item(db, qty=5)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "5"},
+                follow_redirects=True)
+    client.post(f"/pos/{po.id}/edit",
+                data={"vendor": "", "ship_to": "", "notes": "",
+                      "status": "ordered"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+
+    client.post(f"/pos/receiving/{po.id}/receive",
+                data={f"qty_{line.id}": "5"},
+                follow_redirects=True)
+    db.session.refresh(po)
+    assert po.status == "received"
+
+
+def test_receiving_caps_qty_at_outstanding(client, db):
+    item, po = _seed_one_complete_item(db, qty=5)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": "5"},
+                follow_redirects=True)
+    client.post(f"/pos/{po.id}/edit",
+                data={"vendor": "", "ship_to": "", "notes": "",
+                      "status": "ordered"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+
+    # Ask to receive 999; should be capped to 5.
+    client.post(f"/pos/receiving/{po.id}/receive",
+                data={f"qty_{line.id}": "999"},
+                follow_redirects=True)
+    db.session.refresh(line)
+    assert line.qty_received == 5
