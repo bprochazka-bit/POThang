@@ -6,20 +6,20 @@
 <form method="get" class="filters">
   <input type="text" name="q" value="{{ request.args.get('q', '') }}" placeholder="Search name, description, model, sku, notes">
 
-  <select name="state">
+  <select name="state" onchange="this.form.submit()">
     <option value="">All states</option>
     {% for s in states %}
       <option value="{{ s }}" {% if request.args.get('state') == s %}selected{% endif %}>{{ s }}</option>
     {% endfor %}
   </select>
 
-  <select name="complete" title="Filter by required-fields completeness">
+  <select name="complete" title="Filter by required-fields completeness" onchange="this.form.submit()">
     <option value="" {% if not completeness %}selected{% endif %}>All items</option>
     <option value="no" {% if completeness == 'no' %}selected{% endif %}>Incomplete only</option>
     <option value="yes" {% if completeness == 'yes' %}selected{% endif %}>Complete only</option>
   </select>
 
-  <select name="tag">
+  <select name="tag" onchange="this.form.submit()">
     <option value="">All tags</option>
     <option value="__none__" {% if request.args.get('tag') == '__none__' %}selected{% endif %}>— No tag —</option>
     {% for t in all_tags %}
@@ -27,7 +27,7 @@
     {% endfor %}
   </select>
 
-  <select name="po">
+  <select name="po" onchange="this.form.submit()">
     <option value="">All POs</option>
     <option value="__none__" {% if request.args.get('po') == '__none__' %}selected{% endif %}>— No PO —</option>
     {% for n in all_pos %}

@@ -27,25 +27,49 @@ from .models import Attachment, Item, POLine, PurchaseOrder, Receipt, Tag
 def recompute_item_state(item: Item) -> None:
     """Recompute and assign item.state from current allocations and receipts.
 
-    Manual states (cancelled, approved) are preserved if they still make
-    sense; otherwise we fall through to the derived states.
+    The item's state mirrors the most-progressed PO it sits on:
+
+      - received  : sum(receipts) >= item.qty
+      - partial   : sum(receipts) > 0
+      - ordered   : sum of qty on POs in {ordered, partial, received} >= item.qty
+      - approved  : item is on at least one approved-but-not-yet-placed PO,
+                    OR the user manually flagged it approved.
+      - requested : everything else.
+
+    Cancelled is terminal (user-set, never overwritten).
+
+    Draft POs intentionally do NOT advance item state - draft is a working
+    state for the buyer, not a commitment - though they still count toward
+    qty_on_active_pos / qty_unallocated to prevent double-allocating an item
+    to two POs at once.
     """
     if item.state == "cancelled":
         return  # terminal, user-set
 
-    qty_allocated = item.qty_on_active_pos
-    qty_received = item.qty_received
     qty_total = item.qty or 0
+    qty_received = item.qty_received
+
+    # Lines on POs that have actually been placed with the vendor.
+    qty_placed = sum(
+        line.qty for line in item.lines
+        if line.po and line.po.status in ("ordered", "partial", "received")
+    )
+    # Any line on an approved-but-not-yet-placed PO?
+    has_approved_line = any(
+        line.po is not None and line.po.status == "approved"
+        for line in item.lines
+    )
 
     if qty_received >= qty_total and qty_total > 0:
         item.state = "received"
     elif qty_received > 0:
         item.state = "partial"
-    elif qty_allocated >= qty_total and qty_total > 0:
+    elif qty_placed >= qty_total and qty_total > 0:
         item.state = "ordered"
-    elif item.state == "approved":
-        # Keep user's explicit approval until the item gets onto a PO.
-        return
+    elif has_approved_line or item.state == "approved":
+        # On an approved PO, OR user manually flagged it approved before any
+        # PO existed and we haven't progressed past that yet.
+        item.state = "approved"
     else:
         item.state = "requested"
 

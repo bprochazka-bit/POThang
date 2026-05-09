@@ -411,3 +411,38 @@ table.data tbody tr.row-incomplete > td:first-child {
 
 /* Generic "muted" helper */
 .muted { color: var(--fg-subtle); }
+
+/* ---------- PO detail two-column layout ---------- */
+.po-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+.po-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  position: sticky;
+  /* Sticky offset = header height + breathing room */
+  top: 4.25rem;
+  align-self: start;
+  /* Bound the sidebar so its own scroll handles overflow on short viewports */
+  max-height: calc(100vh - 5rem);
+  overflow-y: auto;
+}
+.po-sidebar .card {
+  margin-bottom: 0;
+  padding: 0.85rem 1rem;
+}
+.po-sidebar .card h2 {
+  font-size: 0.95rem;
+  margin-bottom: 0.55rem;
+}
+.po-sidebar .card p { margin: 0.4rem 0; }
+.po-main { min-width: 0; }  /* allow tables to shrink inside the grid */
+
+@media (max-width: 1000px) {
+  .po-layout { grid-template-columns: 1fr; }
+  .po-sidebar { position: static; max-height: none; }
+}

@@ -152,6 +152,21 @@ def add_line(po_id: int):
         flash("Item is fully allocated to other POs.", "error")
         return redirect(url_for("pos.detail", po_id=po.id))
 
+    # Merge into any existing line on this PO for the same item, instead of
+    # creating a duplicate row.
+    existing = (
+        db.session.query(POLine)
+        .filter_by(po_id=po.id, item_id=item.id)
+        .first()
+    )
+    if existing is not None:
+        existing.qty += qty
+        db.session.flush()
+        recompute_item_state(item)
+        db.session.commit()
+        flash(f"Updated {item.name}: +{qty} (now {existing.qty}).")
+        return redirect(url_for("pos.detail", po_id=po.id))
+
     line = POLine(po_id=po.id, item_id=item.id, qty=qty,
                   unit_cost=item.unit_cost)
     db.session.add(line)
@@ -160,6 +175,55 @@ def add_line(po_id: int):
     db.session.commit()
     flash(f"Added {qty} x {item.name}.")
     return redirect(url_for("pos.detail", po_id=po.id))
+
+
+@bp.route("/lines/<int:line_id>/qty", methods=["POST"])
+@login_required
+def update_line_qty(line_id: int):
+    """Adjust the qty on an existing PO line.
+
+    The new qty must be at least the qty already received and may not exceed
+    what the item still has unallocated (plus this line's current allocation).
+    """
+    line = db.session.get(POLine, line_id) or abort(404)
+    new_qty = request.form.get("qty", type=int)
+    if new_qty is None or new_qty < 1:
+        flash("Quantity must be a positive integer.", "error")
+        return redirect(url_for("pos.detail", po_id=line.po_id))
+
+    received = line.qty_received
+    if new_qty < received:
+        flash(
+            f"Cannot set qty below the {received} already received. "
+            f"Adjust receipts first.",
+            "error",
+        )
+        return redirect(url_for("pos.detail", po_id=line.po_id))
+
+    item = line.item
+    # Item.qty_unallocated already excludes this line's current qty, so the
+    # cap on the new qty is line.qty + qty_unallocated.
+    if item is not None:
+        max_qty = line.qty + (item.qty_unallocated or 0)
+        if new_qty > max_qty:
+            flash(
+                f"Only {max_qty} of {item.name} available "
+                f"(item qty {item.qty}, allocations on other POs subtracted).",
+                "error",
+            )
+            return redirect(url_for("pos.detail", po_id=line.po_id))
+
+    old_qty = line.qty
+    line.qty = new_qty
+    db.session.flush()
+    if item is not None:
+        recompute_item_state(item)
+    # If the new qty is now fully covered by receipts, propagate to PO status.
+    if line.po and line.po.fully_received and line.po.status != "received":
+        line.po.status = "received"
+    db.session.commit()
+    flash(f"Updated qty: {old_qty} → {new_qty}.")
+    return redirect(url_for("pos.detail", po_id=line.po_id))
 
 
 @bp.route("/<int:po_id>/lines/add-all", methods=["POST"])
@@ -183,17 +247,31 @@ def add_all(po_id: int):
                                 **{"tag": tag_filter} if tag_filter else {}))
 
     added = 0
+    merged = 0
     for item in candidates:
         qty = item.qty_unallocated
-        line = POLine(po_id=po.id, item_id=item.id, qty=qty,
-                      unit_cost=item.unit_cost)
-        db.session.add(line)
+        existing = (
+            db.session.query(POLine)
+            .filter_by(po_id=po.id, item_id=item.id)
+            .first()
+        )
+        if existing is not None:
+            existing.qty += qty
+            merged += 1
+        else:
+            line = POLine(po_id=po.id, item_id=item.id, qty=qty,
+                          unit_cost=item.unit_cost)
+            db.session.add(line)
+            added += 1
         db.session.flush()
         recompute_item_state(item)
-        added += 1
 
     db.session.commit()
-    flash(f"Added {added} item{'' if added == 1 else 's'} to PO.")
+    if merged:
+        flash(f"Added {added} item{'' if added == 1 else 's'}; "
+              f"merged into {merged} existing line{'' if merged == 1 else 's'}.")
+    else:
+        flash(f"Added {added} item{'' if added == 1 else 's'} to PO.")
     return redirect(url_for("pos.detail", po_id=po.id,
                             **{"tag": tag_filter} if tag_filter else {}))
 
@@ -237,6 +315,99 @@ def receive_line(line_id: int):
     db.session.commit()
     flash(f"Recorded receipt of {qty}.")
     return redirect(url_for("pos.detail", po_id=line.po_id))
+
+
+# ---------- Receiving workflow ----------
+
+def _receivable_pos():
+    """POs that have at least one line with outstanding qty.
+
+    Excludes draft and cancelled POs - you should only be receiving against
+    POs that have actually been placed (approved / ordered / partial).
+    """
+    pos = (
+        db.session.query(PurchaseOrder)
+        .filter(PurchaseOrder.status.in_(["approved", "ordered", "partial",
+                                          "received"]))
+        .order_by(PurchaseOrder.created_at.desc())
+        .all()
+    )
+    return [p for p in pos if any(l.qty - l.qty_received > 0 for l in p.lines)]
+
+
+@bp.route("/receiving/")
+@login_required
+def receiving_index():
+    """Pick a PO to receive against."""
+    selected_id = request.args.get("po_id", type=int)
+    pos = _receivable_pos()
+    selected_po = None
+    if selected_id is not None:
+        selected_po = db.session.get(PurchaseOrder, selected_id)
+        if selected_po is None:
+            abort(404)
+    return render_template(
+        "pos/receiving.html",
+        pos=pos,
+        selected_po=selected_po,
+    )
+
+
+@bp.route("/receiving/<int:po_id>/receive", methods=["POST"])
+@login_required
+def receiving_receive(po_id: int):
+    """Batch-record receipts on multiple lines of one PO."""
+    po = db.session.get(PurchaseOrder, po_id) or abort(404)
+
+    note = (request.form.get("notes") or "").strip() or None
+    received_lines = 0
+    received_units = 0
+    touched_items: set[int] = set()
+
+    for line in po.lines:
+        outstanding = line.qty - line.qty_received
+        if outstanding <= 0:
+            continue
+        raw = request.form.get(f"qty_{line.id}", "").strip()
+        if not raw:
+            continue
+        try:
+            qty = int(raw)
+        except ValueError:
+            continue
+        if qty <= 0:
+            continue
+        if qty > outstanding:
+            qty = outstanding
+        receipt = Receipt(qty=qty, notes=note)
+        # Append via the relationship so line.receipts reflects the new row
+        # immediately (otherwise fully_received computes off stale state).
+        line.receipts.append(receipt)
+        received_lines += 1
+        received_units += qty
+        if line.item_id is not None:
+            touched_items.add(line.item_id)
+
+    if received_lines == 0:
+        flash("No quantities entered - nothing received.", "error")
+        return redirect(url_for("pos.receiving_index", po_id=po.id))
+
+    db.session.flush()
+    for item_id in touched_items:
+        item = db.session.get(Item, item_id)
+        if item is not None:
+            recompute_item_state(item)
+
+    if po.fully_received and po.status != "received":
+        po.status = "received"
+
+    db.session.commit()
+    flash(
+        f"Received {received_units} unit{'' if received_units == 1 else 's'} "
+        f"across {received_lines} line{'' if received_lines == 1 else 's'} "
+        f"on PO {po.po_number}."
+    )
+    return redirect(url_for("pos.receiving_index", po_id=po.id))
 
 
 @bp.route("/<int:po_id>/render", methods=["POST"])
