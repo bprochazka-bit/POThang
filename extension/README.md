@@ -108,6 +108,26 @@ extension/
   build.sh                 # produces dist/hfcs-<version>.xpi
 ```
 
+## Data collection declaration
+
+Mozilla requires every new extension (as of late 2025) to declare what
+user data it transmits, via
+`browser_specific_settings.gecko.data_collection_permissions` in
+`manifest.json`. HFCS declares:
+
+```json
+"data_collection_permissions": {
+  "required": ["none"]
+}
+```
+
+…because it doesn't transmit anything. Captured product data lives in
+`browser.storage.local` on the user's own machine, and only leaves when
+the user clicks Export CSV / JSON — which writes to a local file the
+user chose. There is no telemetry, no remote endpoint, and no
+third-party transmission. If a future site adapter ever calls out to a
+remote service (e.g. an API lookup), this declaration needs revisiting.
+
 ## Export format
 
 CSV columns (and JSON object keys) match the aliases recognised by
