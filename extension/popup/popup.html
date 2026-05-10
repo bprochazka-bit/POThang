@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PurchaseTracker Capture</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>PurchaseTracker Capture</h1>
+  </header>
+
+  <section id="capture-section">
+    <div id="capture-status" class="status" role="status"></div>
+    <form id="capture-form" hidden>
+      <label class="full">
+        <span>Name</span>
+        <input name="name" required autocomplete="off">
+      </label>
+
+      <label class="full">
+        <span>Description</span>
+        <textarea name="description" rows="4"></textarea>
+      </label>
+
+      <div class="row">
+        <label>
+          <span>Vendor / Brand</span>
+          <input name="vendor" autocomplete="off">
+        </label>
+        <label>
+          <span>Model</span>
+          <input name="model" autocomplete="off">
+        </label>
+      </div>
+
+      <div class="row">
+        <label>
+          <span>Vendor SKU / ASIN</span>
+          <input name="vendor_sku" autocomplete="off">
+        </label>
+        <label class="narrow">
+          <span>Qty</span>
+          <input name="qty" type="number" min="1" step="1" value="1">
+        </label>
+        <label class="narrow">
+          <span>Unit cost</span>
+          <input name="unit_cost" type="number" min="0" step="0.01">
+        </label>
+      </div>
+
+      <label class="full">
+        <span>URL</span>
+        <input name="url" type="url" autocomplete="off">
+      </label>
+
+      <label class="full">
+        <span>Notes</span>
+        <textarea name="notes" rows="2"></textarea>
+      </label>
+
+      <div class="actions">
+        <button type="button" id="reset-btn" title="Reset all fields to what was originally extracted from the page">Reset to scraped</button>
+        <button type="button" id="raw-btn">Show raw</button>
+        <button type="submit" class="primary">Add to list</button>
+      </div>
+
+      <pre id="raw-view" hidden></pre>
+    </form>
+  </section>
+
+  <section id="list-section">
+    <h2>Captured list <span id="list-count">(0)</span></h2>
+    <ol id="list" aria-live="polite"></ol>
+    <p id="list-empty" class="muted">Nothing captured yet.</p>
+    <div class="list-actions">
+      <button id="export-csv-btn">Export CSV</button>
+      <button id="export-json-btn">Export JSON</button>
+      <button id="clear-btn" class="danger" type="button">Clear list</button>
+    </div>
+  </section>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
