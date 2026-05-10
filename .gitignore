@@ -13,3 +13,6 @@ uploads/
 .DS_Store
 *.swp
 *.swo
+
+# Extension build output
+extension/dist/

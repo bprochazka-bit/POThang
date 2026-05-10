@@ -156,7 +156,7 @@ function attachHandlers() {
 
 function filename(ext) {
   const stamp = new Date().toISOString().slice(0, 10);
-  return `purchasetracker-capture-${stamp}.${ext}`;
+  return `hfcs-${stamp}.${ext}`;
 }
 
 async function renderList() {

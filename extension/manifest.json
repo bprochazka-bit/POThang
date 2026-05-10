@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "PurchaseTracker Capture",
+  "name": "HFCS",
   "version": "0.1.0",
-  "description": "Capture product details from supported sites (Amazon for now) into a local list, then export as CSV or JSON for import into PurchaseTracker.",
+  "description": "Capture product details from supported shopping sites (Amazon for now) into a local list, then export as CSV or JSON.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "purchasetracker-capture@pothang.local",
+      "id": "hfcs@pothang.local",
       "strict_min_version": "115.0"
     }
   },
@@ -26,7 +26,7 @@
     "*://*.amazon.com.br/*"
   ],
   "action": {
-    "default_title": "Capture product to PurchaseTracker",
+    "default_title": "HFCS — capture product",
     "default_popup": "popup/popup.html",
     "default_icon": "icons/icon.svg"
   },
