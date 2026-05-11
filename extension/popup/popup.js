@@ -184,8 +184,9 @@ async function renderList() {
     if (it.vendor_sku) parts.push(it.vendor_sku);
     parts.push(`qty ${it.qty}`);
     if (it.unit_cost) parts.push("$" + Number(it.unit_cost).toFixed(2));
+    if (it.captured_at) parts.push(it.captured_at.slice(0, 10));
     meta.textContent = parts.join(" · ");
-    meta.title = it.url || "";
+    meta.title = (it.url || "") + (it.captured_at ? `\nCaptured ${it.captured_at}` : "");
 
     main.append(title, meta);
 

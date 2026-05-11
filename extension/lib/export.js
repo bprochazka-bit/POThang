@@ -1,8 +1,10 @@
 // CSV / JSON serialization for the captured-items list.
 //
-// Column names match PurchaseTracker's import-wizard field aliases in
+// Most column names match PurchaseTracker's import-wizard field aliases in
 // purchasetracker/import_parsers.py (PT_FIELD_ALIASES), so the wizard will
-// auto-map every column without user intervention.
+// auto-map them without user intervention. `captured_at` is an extra column
+// (not in PT's aliases) so it'll show up unmapped in the wizard - map it to
+// notes if you want to keep the date in PT, or ignore it.
 
 const COLUMNS = [
   "name",
@@ -14,6 +16,7 @@ const COLUMNS = [
   "qty",
   "unit_cost",
   "notes",
+  "captured_at",
 ];
 
 function csvEscape(v) {

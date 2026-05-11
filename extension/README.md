@@ -130,12 +130,20 @@ remote service (e.g. an API lookup), this declaration needs revisiting.
 
 ## Export format
 
-CSV columns (and JSON object keys) match the aliases recognised by
-`purchasetracker/import_parsers.py::PT_FIELD_ALIASES`:
+CSV columns (and JSON object keys):
 
 ```
-name, description, vendor, model, vendor_sku, url, qty, unit_cost, notes
+name, description, vendor, model, vendor_sku, url, qty, unit_cost, notes, captured_at
 ```
+
+The first nine match the aliases recognised by
+`purchasetracker/import_parsers.py::PT_FIELD_ALIASES`, so the import
+wizard auto-maps them. `captured_at` is an ISO-8601 timestamp recording
+when **you** clicked Add to list in the popup — it isn't a PT-recognised
+field, so the wizard will list it as unmapped and you can map it to
+`notes` (or ignore it). The same value appears on each row of the
+popup's captured-list view (date portion only), so you can sanity-check
+ages before exporting.
 
 JSON uses the same `{"items": [...]}` envelope as PT's own JSON export, so
 it round-trips through the same import endpoint.
