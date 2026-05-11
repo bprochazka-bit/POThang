@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 # Adjust User, Group, and WorkingDirectory for your install location.
-User=purchasetracker
-Group=purchasetracker
+User=user
+Group=user
 WorkingDirectory=/srv/purchasetracker
 Environment=PYTHONUNBUFFERED=1
 Environment=FLASK_APP=purchasetracker

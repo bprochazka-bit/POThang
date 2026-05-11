@@ -19,7 +19,7 @@
 #   BACKUP_DIR=/var/backups/pothang
 #                               where to write the backup tarball
 #                               (default: <target>/backups)
-#   APP_USER=purchasetracker    user that owns the deployment
+#   APP_USER=user               user that owns the deployment
 #                               (passed through to deploy/setup.sh)
 #   SKIP_BACKUP=1               skip the data backup step (not recommended)
 
@@ -34,7 +34,7 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="$(cd "$1" && pwd)"
 SERVICE="${SERVICE:-purchasetracker}"
 BACKUP_DIR="${BACKUP_DIR:-$TARGET_DIR/backups}"
-APP_USER="${APP_USER:-purchasetracker}"
+APP_USER="${APP_USER:-user}"
 
 if [ "$SRC_DIR" = "$TARGET_DIR" ]; then
     echo "error: source and target are the same directory ($SRC_DIR)." >&2
