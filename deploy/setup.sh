@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
-APP_USER="${APP_USER:-purchasetracker}"
+APP_USER="${APP_USER:-user}"
 
 cd "$APP_DIR"
 

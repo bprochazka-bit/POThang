@@ -172,7 +172,7 @@ class PurchaseOrder(db.Model):
     ship_to = Column(String(255))
     notes = Column(Text)
     status = Column(String(32), nullable=False, default="draft", index=True)
-    # status: draft | approved | ordered | received (auto) | cancelled
+    # status: draft | submitted | approved | ordered | received (auto) | cancelled
     ordered_at = Column(DateTime)
     created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=dt.datetime.utcnow,

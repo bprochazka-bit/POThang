@@ -38,10 +38,11 @@ def recompute_item_state(item: Item) -> None:
 
     Cancelled is terminal (user-set, never overwritten).
 
-    Draft POs intentionally do NOT advance item state - draft is a working
-    state for the buyer, not a commitment - though they still count toward
-    qty_on_active_pos / qty_unallocated to prevent double-allocating an item
-    to two POs at once.
+    Draft and submitted POs intentionally do NOT advance item state - draft
+    is a working state for the buyer and submitted means the PO is awaiting
+    funding approval, neither of which is a real commitment - though they
+    still count toward qty_on_active_pos / qty_unallocated to prevent
+    double-allocating an item to two POs at once.
     """
     if item.state == "cancelled":
         return  # terminal, user-set

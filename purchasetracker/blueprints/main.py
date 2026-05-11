@@ -18,7 +18,7 @@ def index():
     )
     open_pos = (
         db.session.query(PurchaseOrder)
-        .filter(PurchaseOrder.status.in_(["draft", "approved", "ordered"]))
+        .filter(PurchaseOrder.status.in_(["draft", "submitted", "approved", "ordered"]))
         .order_by(PurchaseOrder.created_at.desc())
         .limit(20)
         .all()

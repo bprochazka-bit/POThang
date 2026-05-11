@@ -23,7 +23,7 @@ bp = Blueprint("pos", __name__)
 # User-facing PO statuses. "received" is derived (set automatically when all
 # lines are fully received) and is not in this list to keep the manual control
 # from being confusing.
-PO_STATUSES = ["draft", "approved", "ordered", "cancelled"]
+PO_STATUSES = ["draft", "submitted", "approved", "ordered", "cancelled"]
 DERIVED_PO_STATUSES = ["received"]
 ALL_PO_STATUSES = PO_STATUSES + DERIVED_PO_STATUSES
 

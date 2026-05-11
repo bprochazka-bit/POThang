@@ -32,9 +32,11 @@
     </select>
     <button type="submit">Set</button>
   </form>
-  <p><small>Workflow: <code>draft &rarr; approved &rarr; ordered</code>.
-  <code>received</code> is set automatically once every line is fully
-  received. <code>cancelled</code> is terminal.</small></p>
+  <p><small>Workflow: <code>draft &rarr; submitted &rarr; approved &rarr; ordered</code>.
+  <code>submitted</code> means the draft has been sent to the approver for
+  funding validation; they advance it to <code>approved</code> when ready
+  for the purchasers. <code>received</code> is set automatically once every
+  line is fully received. <code>cancelled</code> is terminal.</small></p>
 </section>
 
 <section class="card">
