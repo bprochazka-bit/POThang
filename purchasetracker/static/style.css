@@ -269,7 +269,8 @@ form.filters {
 .state-partial   { background: rgba(245,215,110,0.15); color: #f5e08e; border-color: rgba(245,215,110,0.35); }
 .state-received  { background: rgba(93,211,158,0.15); color: #8ee3bb; border-color: rgba(93,211,158,0.35); }
 .state-cancelled { background: rgba(244,113,116,0.13); color: #f4a3a5; border-color: rgba(244,113,116,0.3); }
-.state-draft  { background: rgba(154,166,178,0.15); color: #c5cfd9; border-color: rgba(154,166,178,0.3); }
+.state-draft     { background: rgba(154,166,178,0.15); color: #c5cfd9; border-color: rgba(154,166,178,0.3); }
+.state-submitted { background: rgba(170,138,236,0.15); color: #c9b3f5; border-color: rgba(170,138,236,0.35); }
 .state-open   { background: rgba(77,154,255,0.15); color: #a8caff; border-color: rgba(77,154,255,0.35); }
 .state-sent   { background: rgba(240,182,107,0.15); color: #f3c98e; border-color: rgba(240,182,107,0.35); }
 .state-closed { background: rgba(93,211,158,0.15); color: #8ee3bb; border-color: rgba(93,211,158,0.35); }
