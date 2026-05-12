@@ -19,7 +19,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .extensions import db
-from .models import Attachment, Item, POLine, PurchaseOrder, Receipt, Tag
+from .models import (
+    Attachment, Item, PODocument, POLine, PurchaseOrder, Receipt, Tag,
+)
 
 
 # ---------- State recomputation ----------
@@ -73,6 +75,147 @@ def recompute_item_state(item: Item) -> None:
         item.state = "approved"
     else:
         item.state = "requested"
+
+
+# ---------- PO line numbering ----------
+
+def next_po_line_no(po_id: int) -> int:
+    """Return the next stable line_no to assign on this PO (max + 1, or 1)."""
+    current = (
+        db.session.query(POLine.line_no)
+        .filter(POLine.po_id == po_id)
+        .order_by(POLine.line_no.desc())
+        .first()
+    )
+    if current is None or current[0] is None:
+        return 1
+    return int(current[0]) + 1
+
+
+def _render_sort_key(line: POLine):
+    """Sort key for rendering PO lines: by stable line_no, then by id.
+
+    line_no is 1-based for new lines; legacy rows get backfilled by migration.
+    The id tiebreaker keeps things deterministic if two rows somehow share a
+    line_no (shouldn't happen, but cheap insurance).
+    """
+    return (line.line_no or 0, line.id or 0)
+
+
+def renumber_po_lines(po: PurchaseOrder) -> None:
+    """Compact line_no values to 1..N preserving current line_no order."""
+    ordered = sorted(po.lines, key=_render_sort_key)
+    for idx, line in enumerate(ordered, start=1):
+        if line.line_no != idx:
+            line.line_no = idx
+
+
+def move_po_line(line: POLine, direction: int) -> bool:
+    """Swap a line's line_no with its neighbour above (-1) or below (+1).
+
+    Returns True if a swap happened, False if the line was already at the
+    edge. Caller is responsible for committing.
+    """
+    if direction not in (-1, 1):
+        raise ValueError("direction must be -1 or +1")
+    if line.po is None:
+        return False
+
+    siblings = sorted(line.po.lines, key=_render_sort_key)
+    try:
+        idx = siblings.index(line)
+    except ValueError:
+        return False
+    neighbour_idx = idx + direction
+    if neighbour_idx < 0 or neighbour_idx >= len(siblings):
+        return False
+
+    neighbour = siblings[neighbour_idx]
+    line.line_no, neighbour.line_no = neighbour.line_no, line.line_no
+    return True
+
+
+# ---------- Saved PO documents ----------
+
+def next_po_revision(po_id: int) -> int:
+    """Return the next revision number to assign for documents on this PO."""
+    current = (
+        db.session.query(PODocument.revision)
+        .filter(PODocument.po_id == po_id)
+        .order_by(PODocument.revision.desc())
+        .first()
+    )
+    if current is None or current[0] is None:
+        return 1
+    return int(current[0]) + 1
+
+
+def store_po_document(po: PurchaseOrder, content: bytes,
+                      template_name: Optional[str] = None,
+                      generated_by: Optional[str] = None,
+                      revision: Optional[int] = None,
+                      mime_type: str = (
+                          "application/vnd.openxmlformats-"
+                          "officedocument.spreadsheetml.sheet"
+                      )) -> PODocument:
+    """Archive a freshly-rendered PO xlsx and return the PODocument row.
+
+    The blob is written under uploads/<aa>/<bb>/<sha256> (same hash-tree as
+    Attachment) so identical renders dedupe. Caller is responsible for
+    db.session.commit().
+
+    If `revision` is omitted, the next available revision is assigned. Pass
+    it explicitly when you've already used the same value while rendering
+    (e.g., to fill a {{revision}} placeholder), so the printed and archived
+    numbers match.
+    """
+    sha = hashlib.sha256(content).hexdigest()
+    sub = _upload_root() / sha[0:2] / sha[2:4]
+    sub.mkdir(parents=True, exist_ok=True)
+    final = sub / sha
+    if not final.exists():
+        with open(final, "wb") as f:
+            f.write(content)
+
+    if revision is None:
+        revision = next_po_revision(po.id)
+    safe_num = (po.po_number or f"po-{po.id}").replace("/", "-").replace("\\", "-")
+    filename = f"{safe_num}-rev{revision}.xlsx"
+
+    doc = PODocument(
+        po_id=po.id,
+        revision=revision,
+        sha256=sha,
+        original_filename=filename,
+        mime_type=mime_type,
+        size_bytes=len(content),
+        template_name=template_name,
+        generated_by=generated_by,
+    )
+    db.session.add(doc)
+    return doc
+
+
+def po_document_path(doc: PODocument) -> Path:
+    sha = doc.sha256
+    return _upload_root() / sha[0:2] / sha[2:4] / sha
+
+
+def delete_po_document(doc: PODocument) -> None:
+    """Remove the DB row and the on-disk blob if no other rows reference it."""
+    sha = doc.sha256
+    path = po_document_path(doc)
+    db.session.delete(doc)
+    db.session.flush()
+    still_referenced = (
+        db.session.query(PODocument.id).filter_by(sha256=sha).first() is not None
+        or db.session.query(Attachment.id).filter_by(sha256=sha).first() is not None
+    )
+    if not still_referenced and path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def set_item_state(item: Item, new_state: str) -> None:
@@ -182,7 +325,8 @@ _ELSE_RE = re.compile(r"\{\{\s*else\s*\}\}")
 _IF_CLOSE_RE = re.compile(r"\{\{\s*/\s*if\s*\}\}")
 
 
-def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes) -> bytes:
+def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes,
+                   revision: Optional[int] = None) -> bytes:
     """Render a PO into a copy of the supplied xlsx template.
 
     Two replacement modes coexist:
@@ -196,11 +340,14 @@ def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes) -> bytes:
        and the rows that originally followed are shifted down. The
        marker rows themselves are deleted.
 
+    Lines are ordered by their stable line_no so the # column in the rendered
+    document matches what the user sees in the web UI.
+
     Returns the rendered xlsx as bytes.
     """
     wb = load_workbook(io.BytesIO(template_bytes))
 
-    context = _po_context(po)
+    context = _po_context(po, revision=revision)
 
     for ws in wb.worksheets:
         _render_loop_region(ws, po)
@@ -211,7 +358,7 @@ def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
-def _po_context(po: PurchaseOrder) -> dict:
+def _po_context(po: PurchaseOrder, revision: Optional[int] = None) -> dict:
     return {
         "po_number": po.po_number or "",
         "vendor": po.vendor or "",
@@ -220,10 +367,11 @@ def _po_context(po: PurchaseOrder) -> dict:
         "date": (po.ordered_at or po.created_at).strftime("%Y-%m-%d")
                  if (po.ordered_at or po.created_at) else "",
         "total": po.total,
+        "revision": revision if revision is not None else "",
     }
 
 
-def _line_context(line: POLine, idx: int) -> dict:
+def _line_context(line: POLine) -> dict:
     item = line.item
     return {
         "item.name": item.name if item else "",
@@ -235,7 +383,9 @@ def _line_context(line: POLine, idx: int) -> dict:
         "item.qty": line.qty,
         "item.unit_cost": line.unit_cost,
         "item.line_total": line.line_total,
-        "item.index": idx + 1,
+        # Stable per-PO line number set when the line was added (or, on legacy
+        # DBs, backfilled by migration). Matches the "#" shown in the UI.
+        "item.index": line.line_no or 0,
         "item.notes": line.notes or "",
     }
 
@@ -378,9 +528,7 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
             })
         template.append(row_snapshot)
 
-    lines = sorted(po.lines,
-                   key=lambda l: ((l.item.vendor or "").lower(),
-                                  (l.item.name or "").lower()))
+    lines = sorted(po.lines, key=_render_sort_key)
 
     rows_to_remove = close_row - open_row + 1  # inclusive of both markers
     ws.delete_rows(open_row, rows_to_remove)
@@ -395,8 +543,8 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
         ws.insert_rows(open_row, amount=insert_count)
 
     write_row = open_row
-    for idx, line in enumerate(lines):
-        ctx = _line_context(line, idx)
+    for line in lines:
+        ctx = _line_context(line)
         line_base = write_row
         for tmpl_row in template:
             if tmpl_row["height"] is not None:
