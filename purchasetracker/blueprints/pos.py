@@ -13,10 +13,15 @@ from flask import (
     render_template, request, send_file, url_for,
 )
 
-from ..auth import login_required
+from ..auth import current_user, login_required
 from ..extensions import db
-from ..models import Attachment, Item, POLine, PurchaseOrder, Receipt, Tag
-from ..services import recompute_item_state, render_po_xlsx
+from ..models import (
+    Attachment, Item, PODocument, POLine, PurchaseOrder, Receipt, Tag,
+)
+from ..services import (
+    delete_po_document, move_po_line, next_po_line_no, next_po_revision,
+    po_document_path, recompute_item_state, render_po_xlsx, store_po_document,
+)
 
 bp = Blueprint("pos", __name__)
 
@@ -90,9 +95,16 @@ def detail(po_id: int):
     tpl_dir = Path(current_app.config["PO_TEMPLATES_DIR_RESOLVED"])
     po_templates = sorted(p.name for p in tpl_dir.glob("*.xlsx"))
 
+    # Show lines in their stable line_no order, with a deterministic tiebreaker
+    # for legacy rows that share a line_no (would be 0 from the migration).
+    ordered_lines = sorted(po.lines, key=lambda l: (l.line_no or 0, l.id or 0))
+    documents = sorted(po.documents, key=lambda d: d.revision, reverse=True)
+
     return render_template(
         "pos/detail.html",
         po=po,
+        ordered_lines=ordered_lines,
+        documents=documents,
         candidate_items=candidate_items,
         incomplete_count=incomplete_count,
         all_tags=all_tags,
@@ -168,7 +180,8 @@ def add_line(po_id: int):
         return redirect(url_for("pos.detail", po_id=po.id))
 
     line = POLine(po_id=po.id, item_id=item.id, qty=qty,
-                  unit_cost=item.unit_cost)
+                  unit_cost=item.unit_cost,
+                  line_no=next_po_line_no(po.id))
     db.session.add(line)
     db.session.flush()
     recompute_item_state(item)
@@ -260,8 +273,10 @@ def add_all(po_id: int):
             merged += 1
         else:
             line = POLine(po_id=po.id, item_id=item.id, qty=qty,
-                          unit_cost=item.unit_cost)
+                          unit_cost=item.unit_cost,
+                          line_no=next_po_line_no(po.id))
             db.session.add(line)
+            db.session.flush()  # so the next next_po_line_no sees this row
             added += 1
         db.session.flush()
         recompute_item_state(item)
@@ -274,6 +289,20 @@ def add_all(po_id: int):
         flash(f"Added {added} item{'' if added == 1 else 's'} to PO.")
     return redirect(url_for("pos.detail", po_id=po.id,
                             **{"tag": tag_filter} if tag_filter else {}))
+
+
+@bp.route("/lines/<int:line_id>/move", methods=["POST"])
+@login_required
+def move_line(line_id: int):
+    """Shift this line up (-1) or down (+1) one slot in line_no order."""
+    line = db.session.get(POLine, line_id) or abort(404)
+    raw = request.form.get("dir", "")
+    if raw not in ("up", "down"):
+        abort(400)
+    direction = -1 if raw == "up" else 1
+    if move_po_line(line, direction):
+        db.session.commit()
+    return redirect(url_for("pos.detail", po_id=line.po_id))
 
 
 @bp.route("/lines/<int:line_id>/delete", methods=["POST"])
@@ -413,15 +442,22 @@ def receiving_receive(po_id: int):
 @bp.route("/<int:po_id>/render", methods=["POST"])
 @login_required
 def render_xlsx(po_id: int):
-    """Render this PO using a saved or uploaded xlsx template."""
+    """Render this PO using a saved or uploaded xlsx template.
+
+    The rendered file is archived as a PODocument with an incrementing
+    revision number, then sent back to the browser as a download. Past
+    revisions remain downloadable from the PO detail page.
+    """
     po = db.session.get(PurchaseOrder, po_id) or abort(404)
 
     template_bytes: bytes | None = None
+    template_label: str | None = None
 
     # Uploaded file takes priority over a saved template selection.
     uploaded = request.files.get("template")
     if uploaded and uploaded.filename:
         template_bytes = uploaded.read()
+        template_label = f"upload:{uploaded.filename}"
     else:
         template_name = (request.form.get("template_name") or "").strip()
         if template_name and template_name != "__upload__":
@@ -434,25 +470,71 @@ def render_xlsx(po_id: int):
                 flash("Template not found.", "error")
                 return redirect(url_for("pos.detail", po_id=po.id))
             template_bytes = tpl_path.read_bytes()
+            template_label = template_name
 
     if not template_bytes:
         flash("Pick a template to render against.", "error")
         return redirect(url_for("pos.detail", po_id=po.id))
 
+    # Render with the next revision so a {{revision}} placeholder in the
+    # template reflects what the archive will record.
+    next_rev = next_po_revision(po.id)
     try:
-        rendered = render_po_xlsx(po, template_bytes)
+        rendered = render_po_xlsx(po, template_bytes, revision=next_rev)
     except Exception as e:
         current_app.logger.exception("PO render failed")
         flash(f"Render failed: {e}", "error")
         return redirect(url_for("pos.detail", po_id=po.id))
 
-    fname = f"{po.po_number}.xlsx"
+    user = current_user()
+    doc = store_po_document(
+        po, rendered,
+        template_name=template_label,
+        generated_by=(user or {}).get("name"),
+        revision=next_rev,
+    )
+    db.session.commit()
+
     return send_file(
         BytesIO(rendered),
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
-        download_name=fname,
+        download_name=doc.original_filename,
     )
+
+
+@bp.route("/<int:po_id>/documents/<int:doc_id>/download")
+@login_required
+def download_document(po_id: int, doc_id: int):
+    """Download a previously-archived PO revision."""
+    doc = db.session.get(PODocument, doc_id) or abort(404)
+    if doc.po_id != po_id:
+        abort(404)
+    path = po_document_path(doc)
+    if not path.exists():
+        flash("Archived document is missing from disk.", "error")
+        return redirect(url_for("pos.detail", po_id=po_id))
+    return send_file(
+        path,
+        mimetype=doc.mime_type or
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=doc.original_filename,
+    )
+
+
+@bp.route("/<int:po_id>/documents/<int:doc_id>/delete", methods=["POST"])
+@login_required
+def delete_document(po_id: int, doc_id: int):
+    """Delete an archived revision. Revision numbers above it are not renumbered."""
+    doc = db.session.get(PODocument, doc_id) or abort(404)
+    if doc.po_id != po_id:
+        abort(404)
+    rev = doc.revision
+    delete_po_document(doc)
+    db.session.commit()
+    flash(f"Removed revision {rev}.")
+    return redirect(url_for("pos.detail", po_id=po_id))
 
 
 @bp.route("/<int:po_id>/export/json")

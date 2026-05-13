@@ -65,9 +65,13 @@
     {% endif %}
     Placeholders: <code>&#123;&#123;po_number&#125;&#125;</code>,
     <code>&#123;&#123;vendor&#125;&#125;</code>,
-    <code>&#123;&#123;total&#125;&#125;</code>, plus an items loop region
+    <code>&#123;&#123;total&#125;&#125;</code>,
+    <code>&#123;&#123;revision&#125;&#125;</code>,
+    plus an items loop region
     bounded by <code>&#123;&#123;#items&#125;&#125;</code> /
     <code>&#123;&#123;/items&#125;&#125;</code>.
+    Each render is archived as a numbered revision under
+    &ldquo;Saved revisions&rdquo; below.
   </small></p>
   <script>
   (function () {
@@ -81,6 +85,34 @@
     });
   })();
   </script>
+</section>
+
+<section class="card">
+  <h2>Saved revisions</h2>
+  {% if documents %}
+  <ul style="padding-left: 1.1rem; margin: 0.3rem 0 0.6rem;">
+    {% for doc in documents %}
+    <li>
+      <a href="{{ url_for('pos.download_document', po_id=po.id, doc_id=doc.id) }}">
+        rev {{ doc.revision }}
+      </a>
+      <small>
+        &middot; {{ doc.generated_at.strftime('%Y-%m-%d %H:%M') if doc.generated_at }}
+        {% if doc.generated_by %} &middot; by {{ doc.generated_by }}{% endif %}
+        {% if doc.template_name %} &middot; <code>{{ doc.template_name }}</code>{% endif %}
+      </small>
+      <form method="post" action="{{ url_for('pos.delete_document', po_id=po.id, doc_id=doc.id) }}"
+            class="inline" onsubmit="return confirm('Delete revision {{ doc.revision }}?');">
+        <button type="submit" class="link">delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  <p><small>Each render is archived here permanently. Re-rendering creates a new
+  revision rather than replacing the existing ones.</small></p>
+  {% else %}
+  <p><em>No revisions yet. Render the PO from a template above to create one.</em></p>
+  {% endif %}
 </section>
 
 <section class="card">
@@ -130,7 +162,7 @@
 
 <section class="card">
   <h2>Lines</h2>
-  {% if po.lines %}
+  {% if ordered_lines %}
   <table class="data" id="po-lines-table">
     <thead><tr>
       <th>#</th>
@@ -143,9 +175,23 @@
       <th>Actions</th>
     </tr></thead>
     <tbody>
-    {% for line in po.lines %}
+    {% for line in ordered_lines %}
     <tr data-line="{{ loop.index0 }}">
-      <td>{{ loop.index }}</td>
+      <td>
+        <span class="line-no">{{ line.line_no or loop.index }}</span>
+        <span class="line-reorder">
+          <form method="post" action="{{ url_for('pos.move_line', line_id=line.id) }}" class="inline">
+            <input type="hidden" name="dir" value="up">
+            <button type="submit" class="link" title="Move up"
+                    {% if loop.first %}disabled{% endif %}>&#9650;</button>
+          </form>
+          <form method="post" action="{{ url_for('pos.move_line', line_id=line.id) }}" class="inline">
+            <input type="hidden" name="dir" value="down">
+            <button type="submit" class="link" title="Move down"
+                    {% if loop.last %}disabled{% endif %}>&#9660;</button>
+          </form>
+        </span>
+      </td>
       <td><a href="{{ url_for('items.detail', item_id=line.item_id) }}">{{ line.item.name }}</a></td>
       <td>{{ line.item.vendor or '' }}</td>
       <td>
@@ -184,12 +230,21 @@
     {% endfor %}
     </tbody>
   </table>
+  <p><small>The <strong>#</strong> column is the stable line number written into the rendered PO document. Use the arrows to reorder.</small></p>
 
   <script>
   (function () {
     var table = document.getElementById('po-lines-table');
     var ths = table.querySelectorAll('thead th[data-sort]');
     var sortCol = -1, sortAsc = true;
+    // Reorder arrows operate on the canonical line_no order. When the user
+    // has client-side sorted to something else, the arrows would jump rows
+    // around in surprising ways, so hide them until the sort is cleared.
+    function setReorderVisible(visible) {
+      table.querySelectorAll('.line-reorder').forEach(function (el) {
+        el.style.display = visible ? '' : 'none';
+      });
+    }
 
     ths.forEach(function (th, i) {
       // Offset by 1 because the first <th> (#) has no data-sort.
@@ -201,6 +256,7 @@
         sortTable(colIdx, th.dataset.sort === 'num', sortAsc);
         ths.forEach(function (h) { h.textContent = h.textContent.replace(/ [▲▼]$/, ''); });
         th.textContent += sortAsc ? ' ▲' : ' ▼';
+        setReorderVisible(false);
       });
     });
 

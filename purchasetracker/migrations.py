@@ -20,6 +20,7 @@ from .extensions import db
 def run_migrations() -> None:
     """Run all schema migrations. Called from create_app under app_context."""
     _migrate_add_item_name()
+    _migrate_add_po_line_no()
 
 
 def _migrate_add_item_name() -> None:
@@ -50,3 +51,36 @@ def _migrate_add_item_name() -> None:
             "UPDATE items SET name = COALESCE(description, '') "
             "WHERE name = '' OR name IS NULL"
         ))
+
+
+def _migrate_add_po_line_no() -> None:
+    """v6: give POLine a stable per-PO line number.
+
+    Older installs had no line_no - line ordering came from list order in
+    po.lines and the xlsx renderer sorted by vendor/name, which meant the
+    "#" shown in the UI didn't match the number printed on the rendered
+    document. Backfill assigns 1..N per PO, ordered by id (oldest first).
+    """
+    insp = inspect(db.engine)
+    if "po_lines" not in insp.get_table_names():
+        return
+
+    cols = {c["name"] for c in insp.get_columns("po_lines")}
+    if "line_no" in cols:
+        return
+
+    with db.engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE po_lines ADD COLUMN line_no INTEGER NOT NULL DEFAULT 0"
+        ))
+        # Backfill: for each row, set line_no to its rank (by id) within its PO.
+        # SQLite supports this correlated subquery on a non-trivial table.
+        conn.execute(text("""
+            UPDATE po_lines
+            SET line_no = (
+                SELECT COUNT(*)
+                FROM po_lines AS p2
+                WHERE p2.po_id = po_lines.po_id
+                  AND p2.id <= po_lines.id
+            )
+        """))

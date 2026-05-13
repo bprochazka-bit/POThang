@@ -191,6 +191,20 @@ button.link {
 }
 button.link:hover { background: none; color: #ff8e91; }
 
+/* Stable PO line number cell: number left, tight up/down reorder buttons on the right. */
+.line-no { font-weight: 600; margin-right: 0.4rem; }
+.line-reorder { display: inline-flex; flex-direction: column; gap: 0; vertical-align: middle; }
+.line-reorder form.inline { margin: 0; }
+.line-reorder button.link {
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-size: 0.65rem;
+  line-height: 0.85;
+  padding: 0 0.1rem;
+}
+.line-reorder button.link:hover { color: var(--accent); }
+.line-reorder button.link[disabled] { color: var(--fg-subtle); cursor: not-allowed; }
+
 /* ---------- Forms ---------- */
 input, select, textarea {
   font: inherit;

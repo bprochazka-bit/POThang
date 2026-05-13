@@ -32,7 +32,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Column, Integer, String, Text, Float, DateTime, ForeignKey, Table,
-    UniqueConstraint, Index,
+    UniqueConstraint, Index, event, func, select,
 )
 from sqlalchemy.orm import relationship
 
@@ -185,6 +185,11 @@ class PurchaseOrder(db.Model):
         primaryjoin="and_(Attachment.po_id==PurchaseOrder.id)",
         cascade="all, delete-orphan",
     )
+    documents = relationship(
+        "PODocument", back_populates="po",
+        order_by="PODocument.revision",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def total(self) -> float:
@@ -224,6 +229,10 @@ class POLine(db.Model):
     # Snapshot of cost at PO creation time (item unit_cost may drift later).
     unit_cost = Column(Float, nullable=False, default=0.0)
     notes = Column(Text)
+    # Stable per-PO line number, assigned at insertion time. Survives sorting
+    # and re-renders so the "#" the user sees on screen matches the rendered
+    # xlsx. Never reused; gaps are left when a line is deleted.
+    line_no = Column(Integer, nullable=False, default=0, index=True)
 
     po = relationship("PurchaseOrder", back_populates="lines")
     item = relationship("Item", back_populates="lines")
@@ -232,6 +241,7 @@ class POLine(db.Model):
 
     __table_args__ = (
         Index("ix_poline_po_item", "po_id", "item_id"),
+        Index("ix_poline_po_line_no", "po_id", "line_no"),
     )
 
     @property
@@ -247,6 +257,7 @@ class POLine(db.Model):
             "id": self.id,
             "po_id": self.po_id,
             "po_number": self.po.po_number if self.po else None,
+            "line_no": self.line_no,
             "item_id": self.item_id,
             "item_name": self.item.name if self.item else None,
             "item_description": self.item.description if self.item else None,
@@ -257,6 +268,38 @@ class POLine(db.Model):
             "notes": self.notes,
             "receipts": [r.to_dict() for r in self.receipts],
         }
+
+
+@event.listens_for(db.session, "before_flush")
+def _assign_po_line_numbers(session, flush_context, instances):
+    """Auto-assign a stable per-PO line_no for new POLine rows.
+
+    The pos blueprint explicitly passes line_no when adding lines through
+    the UI, but tests and admin scripts that create POLines directly should
+    still get a sensible number rather than colliding at 0. We handle all
+    pending POLines in one pass so multiple inserts within a single flush
+    receive distinct, increasing values per PO.
+    """
+    pending = [
+        obj for obj in session.new
+        if isinstance(obj, POLine) and obj.po_id is not None
+        and (obj.line_no is None or obj.line_no <= 0)
+    ]
+    if not pending:
+        return
+    # Group by po_id, then walk the DB max once per group.
+    by_po: dict[int, list[POLine]] = {}
+    for obj in pending:
+        by_po.setdefault(obj.po_id, []).append(obj)
+    for po_id, rows in by_po.items():
+        current = session.execute(
+            select(func.coalesce(func.max(POLine.line_no), 0))
+            .where(POLine.po_id == po_id)
+        ).scalar() or 0
+        next_no = int(current) + 1
+        for row in rows:
+            row.line_no = next_no
+            next_no += 1
 
 
 class Receipt(db.Model):
@@ -279,6 +322,49 @@ class Receipt(db.Model):
             "received_at": self.received_at.isoformat() if self.received_at else None,
             "received_by": self.received_by,
             "notes": self.notes,
+        }
+
+
+class PODocument(db.Model):
+    """A rendered PO xlsx archived on the server.
+
+    Each render of a PO produces a new immutable revision. The bytes live on
+    disk under uploads/<aa>/<bb>/<sha256> (same hash-tree as Attachment) so
+    identical renders share a blob. Revisions are numbered per-PO starting
+    at 1 and never reused.
+    """
+    __tablename__ = "po_documents"
+    id = Column(Integer, primary_key=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id", ondelete="CASCADE"),
+                   nullable=False)
+    revision = Column(Integer, nullable=False)
+    sha256 = Column(String(64), nullable=False, index=True)
+    original_filename = Column(String(255), nullable=False)
+    mime_type = Column(String(128))
+    size_bytes = Column(Integer)
+    template_name = Column(String(255))
+    generated_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
+    generated_by = Column(String(128))
+
+    po = relationship("PurchaseOrder", back_populates="documents")
+
+    __table_args__ = (
+        UniqueConstraint("po_id", "revision", name="uq_po_documents_rev"),
+        Index("ix_po_documents_po", "po_id"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "po_id": self.po_id,
+            "revision": self.revision,
+            "sha256": self.sha256,
+            "original_filename": self.original_filename,
+            "mime_type": self.mime_type,
+            "size_bytes": self.size_bytes,
+            "template_name": self.template_name,
+            "generated_at": self.generated_at.isoformat() if self.generated_at else None,
+            "generated_by": self.generated_by,
         }
 
 
