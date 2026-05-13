@@ -98,6 +98,25 @@ Two ways to mark up an xlsx file you supply as a PO template:
    `{{item.model}}`, `{{item.vendor_sku}}`, `{{item.url}}`. The block is
    repeated once per line item; rows below the block shift down.
 
+3. **Excel formulas** — formula cells (anything starting with `=`) pass
+   through the same templating, so you can wire totals, taxes, and
+   per-row math directly into your template:
+
+   - Inside the loop, use `{{row}}` for the current line's absolute row
+     number — e.g. `=C{{row}}*D{{row}}` becomes `=C5*D5`, `=C6*D6`, … as
+     the template row is duplicated per line.
+   - Outside the loop, reference the expanded items region with
+     `{{items.range.X}}` (X is a column letter) — e.g.
+     `=SUM({{items.range.E}})` becomes `=SUM(E5:E10)`. Pair this with a
+     tax rate cell to compute `=SUM({{items.range.E}})*0.0825`, or any
+     other aggregate that depends on how many lines were added.
+   - Companion tokens `{{items.first_row}}`, `{{items.last_row}}`,
+     `{{items.count}}` are available for hand-rolled ranges, and
+     `{{#if items}}…{{else}}…{{/if}}` lets you fall back to a literal
+     when a PO has no lines. (For convenience, an empty PO collapses
+     `{{items.range.X}}` to `0` so aggregates like `=SUM(...)` stay
+     valid without a guard.)
+
 A working sample is in `sample_template/po_template.xlsx`.
 
 ## Auth modes
