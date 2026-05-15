@@ -17,7 +17,7 @@ from typing import Any, BinaryIO, Iterable, Optional, Tuple
 from flask import current_app
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -731,7 +731,7 @@ def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
     italic = bool(font and font.italic)
     size = int(font.size) if font and font.size else None
     name = font.name if font and font.name else None
-    fg = _argb_to_hex(font.color.rgb) if font and font.color else None
+    fg = _color_to_hex(font.color) if font else None
 
     halign = align.horizontal if align and align.horizontal in {
         "left", "center", "right"
@@ -746,15 +746,15 @@ def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
 
     bg = None
     if fill is not None and fill.patternType == "solid":
-        c = fill.fgColor or fill.bgColor
-        if c is not None:
-            bg = _argb_to_hex(c.rgb if c.type == "rgb" else None)
+        bg = _color_to_hex(fill.fgColor) or _color_to_hex(fill.bgColor)
 
     has_format = fmt and fmt not in {"General", "general", None}
     xss_fmt = _excel_to_xss_format(fmt) if has_format else None
 
+    border_obj = _cell_border_to_xss(cell)
+
     if not any([bold, italic, size, name, fg, halign, valign, wrap, bg,
-                xss_fmt, has_format]):
+                xss_fmt, has_format, border_obj]):
         return None, None
 
     style: dict[str, Any] = {}
@@ -788,12 +788,69 @@ def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
         # so we can restore it exactly on save (x-spreadsheet only looks up
         # `style.format`, so unknown keys are safe).
         style["xlsxFormat"] = fmt
+    if border_obj:
+        style["border"] = border_obj
 
     key = (
         bold, italic, size, name, fg, halign, valign, wrap, bg,
         fmt if has_format else None,
+        _border_cache_key(border_obj),
     )
     return key, style
+
+
+# Border styles x-spreadsheet renders natively. Anything else from openpyxl
+# is mapped to the closest visual equivalent.
+_XSS_BORDER_STYLES = {"thin", "medium", "thick", "dashed", "dotted", "double"}
+
+# openpyxl side style → x-spreadsheet side style.
+_OPENPYXL_TO_XSS_BORDER = {
+    "thin": "thin", "medium": "medium", "thick": "thick",
+    "dashed": "dashed", "dotted": "dotted", "double": "double",
+    "hair": "thin", "dashDot": "dashed", "dashDotDot": "dashed",
+    "mediumDashed": "medium", "mediumDashDot": "medium",
+    "mediumDashDotDot": "medium", "slantDashDot": "dashed",
+}
+
+
+def _side_to_xss(side: Any) -> Optional[list]:
+    """Convert an openpyxl Side to x-spreadsheet's ['style', '#color'] tuple."""
+    if side is None or not getattr(side, "style", None):
+        return None
+    style = _OPENPYXL_TO_XSS_BORDER.get(side.style, "thin")
+    color = "#000000"
+    if side.color is not None:
+        hex_ = _argb_to_hex(side.color.rgb if side.color.type == "rgb" else None)
+        if hex_:
+            color = hex_
+    return [style, color]
+
+
+def _cell_border_to_xss(cell: Cell) -> Optional[dict]:
+    """Return an x-spreadsheet border dict, or None if the cell has no borders."""
+    border = cell.border
+    if border is None:
+        return None
+    top = _side_to_xss(border.top)
+    bottom = _side_to_xss(border.bottom)
+    left = _side_to_xss(border.left)
+    right = _side_to_xss(border.right)
+    if not any([top, bottom, left, right]):
+        return None
+    out: dict[str, list] = {}
+    if top:    out["top"] = top
+    if bottom: out["bottom"] = bottom
+    if left:   out["left"] = left
+    if right:  out["right"] = right
+    return out
+
+
+def _border_cache_key(border_obj: Optional[dict]) -> Optional[tuple]:
+    if not border_obj:
+        return None
+    return tuple(
+        (k, tuple(v)) for k, v in sorted(border_obj.items())
+    )
 
 
 # Mapping between Excel number formats and x-spreadsheet's named formats.
@@ -863,6 +920,69 @@ def _argb_to_hex(rgb: Any) -> Optional[str]:
     if len(s) == 6:
         return "#" + s.lower()
     return None
+
+
+# Default Office theme palette (indices match openpyxl's Color(theme=N)).
+# Modern xlsx files store fills/fonts as theme refs rather than raw RGB; if
+# we can't extract a real RGB from the cell, fall back to this table so the
+# editor at least shows roughly the right colour. (Tint is intentionally
+# ignored — preserving exact shades would require parsing the theme XML.)
+_OFFICE_THEME_RGB = {
+    0: "#ffffff", 1: "#000000",
+    2: "#e7e6e6", 3: "#44546a",
+    4: "#5b9bd5", 5: "#ed7d31",
+    6: "#a5a5a5", 7: "#ffc000",
+    8: "#4472c4", 9: "#70ad47",
+    10: "#0563c1", 11: "#954f72",
+}
+
+# Standard Excel indexed colour table (subset — entries 0-63 cover everything
+# real-world templates use; values come from the OOXML spec).
+_INDEXED_COLOR_RGB = {
+    0:  "#000000", 1:  "#ffffff", 2:  "#ff0000", 3:  "#00ff00",
+    4:  "#0000ff", 5:  "#ffff00", 6:  "#ff00ff", 7:  "#00ffff",
+    8:  "#000000", 9:  "#ffffff", 10: "#ff0000", 11: "#00ff00",
+    12: "#0000ff", 13: "#ffff00", 14: "#ff00ff", 15: "#00ffff",
+    16: "#800000", 17: "#008000", 18: "#000080", 19: "#808000",
+    20: "#800080", 21: "#008080", 22: "#c0c0c0", 23: "#808080",
+    24: "#9999ff", 25: "#993366", 26: "#ffffcc", 27: "#ccffff",
+    28: "#660066", 29: "#ff8080", 30: "#0066cc", 31: "#ccccff",
+    32: "#000080", 33: "#ff00ff", 34: "#ffff00", 35: "#00ffff",
+    36: "#800080", 37: "#800000", 38: "#008080", 39: "#0000ff",
+    40: "#00ccff", 41: "#ccffff", 42: "#ccffcc", 43: "#ffff99",
+    44: "#99ccff", 45: "#ff99cc", 46: "#cc99ff", 47: "#ffcc99",
+    48: "#3366ff", 49: "#33cccc", 50: "#99cc00", 51: "#ffcc00",
+    52: "#ff9900", 53: "#ff6600", 54: "#666699", 55: "#969696",
+    56: "#003366", 57: "#339966", 58: "#003300", 59: "#333300",
+    60: "#993300", 61: "#993366", 62: "#333399", 63: "#333333",
+    64: "#000000", 65: "#ffffff",
+}
+
+
+def _color_to_hex(color: Any) -> Optional[str]:
+    """Resolve an openpyxl Color to a '#rrggbb' string, regardless of its type.
+
+    Handles type='rgb' (the easy case), type='theme' (mapped through the
+    default Office palette), and type='indexed' (legacy palette). Returns
+    None if we can't recover any usable colour.
+    """
+    if color is None:
+        return None
+    ctype = getattr(color, "type", None)
+    if ctype == "rgb":
+        return _argb_to_hex(getattr(color, "rgb", None))
+    if ctype == "theme":
+        theme_idx = getattr(color, "theme", None)
+        if isinstance(theme_idx, int):
+            return _OFFICE_THEME_RGB.get(theme_idx)
+        return None
+    if ctype == "indexed":
+        idx = getattr(color, "indexed", None)
+        if isinstance(idx, int):
+            return _INDEXED_COLOR_RGB.get(idx)
+        return None
+    # auto / unset / unknown
+    return _argb_to_hex(getattr(color, "rgb", None))
 
 
 def xspreadsheet_to_xlsx_bytes(data: dict) -> bytes:
@@ -1008,6 +1128,31 @@ def _apply_style_to_cell(cell: Cell, style: dict) -> None:
             mapped = _XSS_TO_EXCEL_FORMAT.get(fmt.lower())
             if mapped:
                 cell.number_format = mapped
+
+    border = style.get("border")
+    if isinstance(border, dict):
+        cell.border = _xss_border_to_openpyxl(border)
+
+
+def _xss_side(spec: Any) -> Optional[Side]:
+    """Decode ['thin', '#000000'] (x-spreadsheet shape) into an openpyxl Side."""
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return None
+    style = spec[0] if len(spec) > 0 else "thin"
+    color_hex = spec[1] if len(spec) > 1 else "#000000"
+    if style not in _XSS_BORDER_STYLES:
+        style = "thin"
+    argb = _hex_to_argb(color_hex) or "FF000000"
+    return Side(style=style, color=argb)
+
+
+def _xss_border_to_openpyxl(border: dict) -> Border:
+    return Border(
+        top=_xss_side(border.get("top")),
+        bottom=_xss_side(border.get("bottom")),
+        left=_xss_side(border.get("left")),
+        right=_xss_side(border.get("right")),
+    )
 
 
 def _hex_to_argb(hex_str: Optional[str]) -> Optional[str]:
