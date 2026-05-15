@@ -687,6 +687,23 @@ def _worksheet_to_xspreadsheet(ws: Worksheet) -> dict:
 
     merges = [str(mr) for mr in ws.merged_cells.ranges]
 
+    # x-spreadsheet needs a merge declared in TWO places: the `merges` array
+    # (drives range selection) AND a `merge: [extraRows, extraCols]` property
+    # on the anchor (top-left) cell (drives the grid actually spanning the
+    # cells). Without the latter the range highlights on click but renders as
+    # separate cells — exactly the inconsistency this annotation fixes.
+    for mr in ws.merged_cells.ranges:
+        min_r, min_c = mr.min_row, mr.min_col
+        extra_rows = mr.max_row - min_r
+        extra_cols = mr.max_col - min_c
+        if extra_rows == 0 and extra_cols == 0:
+            continue
+        rkey, ckey = str(min_r - 1), str(min_c - 1)
+        row_obj = rows.setdefault(rkey, {})
+        cells = row_obj.setdefault("cells", {})
+        anchor = cells.setdefault(ckey, {"text": ""})
+        anchor["merge"] = [extra_rows, extra_cols]
+
     return {
         "name": (ws.title or "Sheet1")[:31],
         "rows": rows,
