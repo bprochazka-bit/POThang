@@ -751,9 +751,10 @@ def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
             bg = _argb_to_hex(c.rgb if c.type == "rgb" else None)
 
     has_format = fmt and fmt not in {"General", "general", None}
+    xss_fmt = _excel_to_xss_format(fmt) if has_format else None
 
     if not any([bold, italic, size, name, fg, halign, valign, wrap, bg,
-                has_format]):
+                xss_fmt, has_format]):
         return None, None
 
     style: dict[str, Any] = {}
@@ -778,15 +779,78 @@ def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
         style["valign"] = valign
     if wrap:
         style["textwrap"] = True
+    if xss_fmt:
+        # Must be one of x-spreadsheet's known format keys, otherwise the
+        # editor crashes during render (it does formats[style.format].render).
+        style["format"] = xss_fmt
     if has_format:
-        style["format"] = fmt  # raw Excel format string; x-spreadsheet ignores
-                                # unknown ones but we preserve on save.
+        # Stash the original Excel format string under a non-conflicting key
+        # so we can restore it exactly on save (x-spreadsheet only looks up
+        # `style.format`, so unknown keys are safe).
+        style["xlsxFormat"] = fmt
 
     key = (
         bold, italic, size, name, fg, halign, valign, wrap, bg,
         fmt if has_format else None,
     )
     return key, style
+
+
+# Mapping between Excel number formats and x-spreadsheet's named formats.
+# x-spreadsheet's known names: normal, text, number, percent, rmb, usd, eur,
+# date, time, datetime, duration. Any other value passed as style.format
+# causes a runtime crash, so we MUST translate.
+_XSS_NAMED_FORMATS = {
+    "normal", "text", "number", "percent",
+    "rmb", "usd", "eur", "date", "time", "datetime", "duration",
+}
+
+
+def _excel_to_xss_format(fmt: Optional[str]) -> Optional[str]:
+    """Map an Excel number format string to x-spreadsheet's nearest named format.
+
+    Returns None for formats we don't recognise — the caller should then omit
+    `style.format` entirely (the raw Excel format string is preserved under
+    `style.xlsxFormat` so the round-trip back to xlsx is lossless).
+    """
+    if not fmt:
+        return None
+    f = fmt.lower()
+    if f in _XSS_NAMED_FORMATS:
+        return f
+    if "$" in fmt:
+        return "usd"
+    if "€" in fmt:
+        return "eur"
+    if "¥" in fmt or "rmb" in f:
+        return "rmb"
+    if "%" in fmt:
+        return "percent"
+    # Date/time detection: openpyxl format strings use y/m/d/h tokens.
+    has_date = any(tok in f for tok in ("yyyy", "yy", "mmm", "dd", "m/d"))
+    has_time = "h" in f and "m" in f  # "hh:mm" patterns
+    if has_date and has_time:
+        return "datetime"
+    if has_date:
+        return "date"
+    if has_time:
+        return "time"
+    if any(ch in fmt for ch in "0#"):
+        return "number"
+    return None
+
+
+# Reverse mapping used when saving the editor's data back to xlsx.
+_XSS_TO_EXCEL_FORMAT = {
+    "number":   "#,##0.00",
+    "percent":  "0.00%",
+    "usd":      '"$"#,##0.00',
+    "eur":      '"€"#,##0.00',
+    "rmb":      '"¥"#,##0.00',
+    "date":     "yyyy-mm-dd",
+    "time":     "hh:mm:ss",
+    "datetime": "yyyy-mm-dd hh:mm:ss",
+}
 
 
 def _argb_to_hex(rgb: Any) -> Optional[str]:
@@ -933,9 +997,17 @@ def _apply_style_to_cell(cell: Cell, style: dict) -> None:
         if argb:
             cell.fill = PatternFill("solid", fgColor=argb)
 
-    fmt = style.get("format")
-    if isinstance(fmt, str) and fmt and fmt.lower() != "normal":
-        cell.number_format = fmt
+    # Prefer the original Excel format string if we stashed one; otherwise
+    # map x-spreadsheet's named format back to an Excel equivalent.
+    xlsx_fmt = style.get("xlsxFormat")
+    if isinstance(xlsx_fmt, str) and xlsx_fmt:
+        cell.number_format = xlsx_fmt
+    else:
+        fmt = style.get("format")
+        if isinstance(fmt, str) and fmt:
+            mapped = _XSS_TO_EXCEL_FORMAT.get(fmt.lower())
+            if mapped:
+                cell.number_format = mapped
 
 
 def _hex_to_argb(hex_str: Optional[str]) -> Optional[str]:
