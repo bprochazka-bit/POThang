@@ -259,6 +259,78 @@ def test_merged_cells_above_loop_unchanged(app, db):
     assert "A1:C1" in _merged_ranges(ws_out)
 
 
+def _build_formula_template_bytes() -> bytes:
+    """Template that uses Excel formulas with {{row}} and {{items.range.X}}."""
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "PO: {{po_number}}"
+    ws["A3"] = "{{#items}}"
+    # Template row 4: per-line formula referencing the current row.
+    ws["A4"] = "{{item.description}}"
+    ws["B4"] = "{{item.qty}}"
+    ws["C4"] = "{{item.unit_cost}}"
+    ws["D4"] = "=B{{row}}*C{{row}}"
+    ws["A5"] = "{{/items}}"
+    # Below the loop: aggregate over the expanded items range, plus tax.
+    ws["A7"] = "Subtotal"
+    ws["D7"] = "=SUM({{items.range.D}})"
+    ws["A8"] = "Tax"
+    ws["D8"] = "=SUM({{items.range.D}})*0.1"
+    ws["A9"] = "Lines"
+    ws["D9"] = "={{items.count}}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_per_row_formula_uses_current_row(app, db):
+    po = _seed_po(db)
+    rendered = render_po_xlsx(po, _build_formula_template_bytes())
+    ws = load_workbook(io.BytesIO(rendered)).active
+    # Open marker at row 3, single template row at 4, close at 5.
+    # Two PO lines -> rows 3 and 4 hold the expanded lines.
+    assert ws.cell(row=3, column=4).value == "=B3*C3"
+    assert ws.cell(row=4, column=4).value == "=B4*C4"
+
+
+def test_items_range_resolves_to_expanded_range(app, db):
+    po = _seed_po(db)
+    rendered = render_po_xlsx(po, _build_formula_template_bytes())
+    ws = load_workbook(io.BytesIO(rendered)).active
+    # Subtotal/Tax/Lines were at rows 7/8/9 in the template. After expansion
+    # (3 marker+template rows replaced by 2 line rows, net -1), they sit at
+    # rows 6/7/8. Easier to find by their label text.
+    label_rows = {}
+    for row in ws.iter_rows():
+        for c in row:
+            if c.value in ("Subtotal", "Tax", "Lines"):
+                label_rows[c.value] = c.row
+    subtotal = ws.cell(row=label_rows["Subtotal"], column=4).value
+    tax = ws.cell(row=label_rows["Tax"], column=4).value
+    count = ws.cell(row=label_rows["Lines"], column=4).value
+    # Items expanded into rows 3 and 4 -> range D3:D4.
+    assert subtotal == "=SUM(D3:D4)"
+    assert tax == "=SUM(D3:D4)*0.1"
+    assert count == "=2"
+
+
+def test_items_range_with_no_lines_collapses_to_zero(app, db):
+    po = PurchaseOrder(po_number="PO-empty", vendor="None")
+    db.session.add(po)
+    db.session.commit()
+    rendered = render_po_xlsx(po, _build_formula_template_bytes())
+    ws = load_workbook(io.BytesIO(rendered)).active
+    # No lines: items.range.D collapses to "0" so =SUM(0) stays valid.
+    for row in ws.iter_rows():
+        for c in row:
+            if c.value == "Subtotal":
+                assert ws.cell(row=c.row, column=4).value == "=SUM(0)"
+            if c.value == "Tax":
+                assert ws.cell(row=c.row, column=4).value == "=SUM(0)*0.1"
+            if c.value == "Lines":
+                assert ws.cell(row=c.row, column=4).value == "=0"
+
+
 def test_sample_template_renders(app, db):
     """Render against the bundled sample template; must not throw."""
     po = _seed_po(db)
