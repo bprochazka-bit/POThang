@@ -119,6 +119,10 @@ Two ways to mark up an xlsx file you supply as a PO template:
 
 A working sample is in `sample_template/po_template.xlsx`.
 
+See [TEMPLATES.md](TEMPLATES.md) for the full token reference, worked
+examples (including formulas, totals, and tax computations), and
+common authoring pitfalls.
+
 ## Auth modes
 
 ### single_user (default)
