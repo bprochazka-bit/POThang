@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if mode == 'edit' %}Edit {{ original_name }}{% else %}New template{% endif %}
+  &middot; PurchaseTracker
+{% endblock %}
+{% block content %}
+
+{# x-spreadsheet CSS + JS via CDN. The app is otherwise no-bundler vanilla
+   JS; to use this offline, vendor these two files into static/ and swap the
+   URLs. #}
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/x-data-spreadsheet@1.1.9/dist/xspreadsheet.css">
+<script src="https://cdn.jsdelivr.net/npm/x-data-spreadsheet@1.1.9/dist/xspreadsheet.js"></script>
+
+<style>
+  /* Force x-spreadsheet's white surfaces onto a contrasting frame so the
+     dark site chrome doesn't bleed into the editor. */
+  .tpl-editor-wrap { background: #ffffff; color: #222; border-radius: 6px;
+                     padding: 6px; box-shadow: var(--shadow); }
+  .tpl-editor-wrap, .tpl-editor-wrap * { color: #222; }
+  .tpl-toolbar { display: flex; gap: 0.5rem; align-items: center;
+                 flex-wrap: wrap; margin-bottom: 0.7rem; }
+  .tpl-toolbar input[type=text] { min-width: 16rem; }
+  .tpl-tabs { display: flex; gap: 0; margin-bottom: 0.5rem;
+              border-bottom: 1px solid var(--border); }
+  .tpl-tab { padding: 0.4rem 1rem; cursor: pointer; user-select: none;
+             border: 1px solid transparent; border-bottom: none;
+             margin-bottom: -1px; color: var(--fg-muted); }
+  .tpl-tab.active { background: var(--surface-1); color: var(--fg);
+                    border-color: var(--border); border-bottom-color: var(--surface-1); }
+  .tpl-pane { display: none; }
+  .tpl-pane.active { display: block; }
+  .tpl-status { margin-left: auto; color: var(--fg-muted); font-size: 0.85rem; }
+  .tpl-status.error { color: var(--danger); }
+  .tpl-status.ok { color: var(--success); }
+  #preview-sheet { pointer-events: auto; /* allow scrolling, no editing */ }
+</style>
+
+<h1>
+  {% if mode == 'edit' %}Edit template{% else %}New template{% endif %}
+</h1>
+
+<p class="meta">
+  <a href="{{ url_for('templates.list_templates') }}">&larr; All templates</a>
+  &middot; The Edit tab is a live spreadsheet (formulas, merged cells, basic
+  styling); the Preview tab renders this template against a sample PO.
+</p>
+
+<div class="tpl-toolbar">
+  <label>Filename:
+    <input type="text" id="tpl-name" value="{{ initial_name }}"
+           placeholder="e.g. po_template.xlsx">
+  </label>
+  <button type="button" id="btn-save" class="btn">Save</button>
+  <button type="button" id="btn-preview">Refresh preview</button>
+  <span class="tpl-status" id="tpl-status"></span>
+</div>
+
+<div class="tpl-tabs" role="tablist">
+  <div class="tpl-tab active" data-pane="edit-pane" role="tab">Edit</div>
+  <div class="tpl-tab" data-pane="preview-pane" role="tab">Preview</div>
+</div>
+
+<div id="edit-pane" class="tpl-pane active">
+  <div class="tpl-editor-wrap"><div id="edit-sheet"></div></div>
+</div>
+<div id="preview-pane" class="tpl-pane">
+  <div class="tpl-editor-wrap"><div id="preview-sheet"></div></div>
+  <p><small>Preview is rendered with a synthetic PO
+  (<code>PREVIEW-001</code>, vendor &ldquo;Acme Corp&rdquo;, three sample
+  items). Formula results are computed client-side by the editor&rsquo;s own
+  formula engine, which covers common functions but is not a full Excel
+  implementation.</small></p>
+</div>
+
+<script>
+(function () {
+  var mode = {{ mode | tojson }};
+  var originalName = {{ original_name | tojson }};
+  var urlSave = {{ url_for('templates.save') | tojson }};
+  var urlPreview = {{ url_for('templates.preview') | tojson }};
+  var urlData = originalName
+    ? {{ url_for('templates.list_templates') | tojson }} + encodeURIComponent(originalName) + '/data'
+    : null;
+  var urlList = {{ url_for('templates.list_templates') | tojson }};
+
+  var statusEl = document.getElementById('tpl-status');
+  var nameEl = document.getElementById('tpl-name');
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg || '';
+    statusEl.className = 'tpl-status' + (kind ? ' ' + kind : '');
+  }
+
+  // Tabs ------------------------------------------------------------------
+  document.querySelectorAll('.tpl-tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      document.querySelectorAll('.tpl-tab').forEach(function (t) {
+        t.classList.toggle('active', t === tab);
+      });
+      var paneId = tab.dataset.pane;
+      document.querySelectorAll('.tpl-pane').forEach(function (p) {
+        p.classList.toggle('active', p.id === paneId);
+      });
+      if (paneId === 'preview-pane') {
+        refreshPreview();
+      }
+    });
+  });
+
+  // Editor instance -------------------------------------------------------
+  var Spreadsheet = window.x_spreadsheet;
+  if (!Spreadsheet) {
+    setStatus('Spreadsheet library failed to load. Check network access to jsdelivr.', 'error');
+    return;
+  }
+
+  var editEl = document.getElementById('edit-sheet');
+  var editor = new Spreadsheet(editEl, {
+    showToolbar: true,
+    showGrid: true,
+    showContextmenu: true,
+    view: {
+      height: function () { return Math.max(520, window.innerHeight - 320); },
+      width: function () { return editEl.clientWidth - 12; },
+    },
+  });
+
+  // Read-only previewer
+  var previewEl = document.getElementById('preview-sheet');
+  var previewer = new Spreadsheet(previewEl, {
+    mode: 'read',
+    showToolbar: false,
+    showGrid: true,
+    showContextmenu: false,
+    view: {
+      height: function () { return Math.max(520, window.innerHeight - 360); },
+      width: function () { return previewEl.clientWidth - 12; },
+    },
+  });
+
+  function currentEditorData() {
+    var data = editor.getData();
+    // x-spreadsheet returns an array of sheets — we only use the first.
+    if (Array.isArray(data)) data = data[0] || {};
+    return data;
+  }
+
+  // Load initial data -----------------------------------------------------
+  if (urlData) {
+    setStatus('Loading…');
+    fetch(urlData, { credentials: 'same-origin' })
+      .then(function (r) { return r.json().then(function (j) { return [r, j]; }); })
+      .then(function (pair) {
+        var r = pair[0], data = pair[1];
+        if (!r.ok) { throw new Error(data.error || 'load failed'); }
+        editor.loadData(data);
+        setStatus('');
+      })
+      .catch(function (e) {
+        setStatus('Could not load template: ' + e.message, 'error');
+      });
+  } else {
+    // Brand-new template: leave the empty grid alone.
+    setStatus('');
+  }
+
+  // Save ------------------------------------------------------------------
+  function save(overwrite) {
+    var name = (nameEl.value || '').trim();
+    if (!name) {
+      setStatus('Filename is required.', 'error');
+      nameEl.focus();
+      return;
+    }
+    setStatus('Saving…');
+    fetch(urlSave, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name,
+        original: originalName || '',
+        overwrite: !!overwrite,
+        data: currentEditorData(),
+      }),
+    })
+      .then(function (r) {
+        return r.json().then(function (j) { return [r, j]; });
+      })
+      .then(function (pair) {
+        var r = pair[0], j = pair[1];
+        if (r.status === 409 && j.conflict) {
+          if (confirm(j.error + '\n\nOverwrite the existing template?')) {
+            return save(true);
+          }
+          setStatus('Save cancelled.', '');
+          return;
+        }
+        if (!r.ok) { throw new Error(j.error || 'save failed'); }
+        setStatus('Saved as ' + j.name + '.', 'ok');
+        // If we renamed (or this was a new template), navigate to the
+        // canonical edit URL so subsequent saves keep the rename in sync.
+        if (j.redirect && j.name !== originalName) {
+          window.location.href = j.redirect;
+        } else {
+          originalName = j.name;
+        }
+      })
+      .catch(function (e) {
+        setStatus('Save failed: ' + e.message, 'error');
+      });
+  }
+  document.getElementById('btn-save').addEventListener('click', function () {
+    save(false);
+  });
+
+  // Preview ---------------------------------------------------------------
+  function refreshPreview() {
+    setStatus('Rendering preview…');
+    fetch(urlPreview, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: currentEditorData() }),
+    })
+      .then(function (r) {
+        return r.json().then(function (j) { return [r, j]; });
+      })
+      .then(function (pair) {
+        var r = pair[0], j = pair[1];
+        if (!r.ok) { throw new Error(j.error || 'preview failed'); }
+        previewer.loadData(j);
+        setStatus('Preview updated.', 'ok');
+      })
+      .catch(function (e) {
+        setStatus('Preview failed: ' + e.message, 'error');
+      });
+  }
+  document.getElementById('btn-preview').addEventListener('click', refreshPreview);
+
+  // Re-flow on resize so the editors fit the viewport.
+  window.addEventListener('resize', function () {
+    editor.reRender && editor.reRender();
+    previewer.reRender && previewer.reRender();
+  });
+})();
+</script>
+
+{% endblock %}

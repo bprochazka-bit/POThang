@@ -3,6 +3,7 @@ Service-layer helpers. Anything that's more than a CRUD operation lives here.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import io
 import os
@@ -10,12 +11,14 @@ import re
 import shutil
 from copy import copy
 from pathlib import Path
-from typing import BinaryIO, Iterable, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, BinaryIO, Iterable, Optional, Tuple
 
 from flask import current_app
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .extensions import db
@@ -601,3 +604,392 @@ def _reapply_external_merges(
         else:
             continue  # overlapped the loop block — drop it
         ws.merge_cells(start_row=min_r, end_row=max_r, start_column=min_c, end_column=max_c)
+
+
+# ---------- xlsx <-> x-spreadsheet JSON (template editor) ----------
+#
+# The template editor in the web UI uses x-spreadsheet, a vanilla-JS
+# spreadsheet component. It loads and emits a JSON document with this rough
+# shape:
+#
+#   {
+#     "name": "Sheet1",
+#     "rows": { "0": { "cells": { "0": {"text": "Hi", "style": 0} },
+#                       "height": 24 }, "len": 100 },
+#     "cols": { "0": {"width": 120}, "len": 26 },
+#     "merges": ["A1:B2"],
+#     "styles": [ {"font": {"bold": true}, "bgcolor": "#fff", ...} ]
+#   }
+#
+# We only model the subset of cell properties that round-trip cleanly: text
+# (including formulas as "=…"), basic font, alignment, background fill,
+# number format, merges, column widths, row heights. Anything else from the
+# source xlsx is dropped on the edit/save round trip — documented in the UI.
+
+_XSS_PX_PER_WIDTH_UNIT = 7  # rough Excel char-width → pixels conversion
+
+
+def xlsx_bytes_to_xspreadsheet(xlsx_bytes: bytes) -> dict:
+    """Convert an .xlsx workbook (bytes) into x-spreadsheet JSON for editing."""
+    wb = load_workbook(io.BytesIO(xlsx_bytes))
+    ws = wb.active
+    return _worksheet_to_xspreadsheet(ws)
+
+
+def _worksheet_to_xspreadsheet(ws: Worksheet) -> dict:
+    rows: dict[str, Any] = {}
+    styles: list[dict] = []
+    style_cache: dict[tuple, int] = {}
+
+    max_r = max(ws.max_row or 1, 1)
+    max_c = max(ws.max_column or 1, 1)
+
+    for r in range(1, max_r + 1):
+        row_cells: dict[str, Any] = {}
+        for c in range(1, max_c + 1):
+            cell = ws.cell(row=r, column=c)
+            val = cell.value
+            if val is None or val == "":
+                # Capture style on otherwise-blank cells only if it's non-default
+                # (keeps the JSON small).
+                continue
+            cell_data: dict[str, Any] = {"text": _xlsx_value_to_text(val)}
+            key, style_obj = _cell_style_signature(cell)
+            if style_obj is not None:
+                if key not in style_cache:
+                    style_cache[key] = len(styles)
+                    styles.append(style_obj)
+                cell_data["style"] = style_cache[key]
+            row_cells[str(c - 1)] = cell_data
+        rd = ws.row_dimensions.get(r)
+        height = rd.height if rd is not None and rd.height else None
+        if row_cells or height:
+            row_obj: dict[str, Any] = {}
+            if row_cells:
+                row_obj["cells"] = row_cells
+            if height:
+                row_obj["height"] = float(height)
+            rows[str(r - 1)] = row_obj
+    rows["len"] = max(max_r + 10, 100)
+
+    cols: dict[str, Any] = {}
+    for col_letter, dim in ws.column_dimensions.items():
+        if not dim.width:
+            continue
+        try:
+            idx = column_index_from_string(col_letter) - 1
+        except ValueError:
+            continue
+        cols[str(idx)] = {
+            "width": int(round(dim.width * _XSS_PX_PER_WIDTH_UNIT + 5))
+        }
+    cols["len"] = max(max_c + 5, 26)
+
+    merges = [str(mr) for mr in ws.merged_cells.ranges]
+
+    return {
+        "name": (ws.title or "Sheet1")[:31],
+        "rows": rows,
+        "cols": cols,
+        "merges": merges,
+        "styles": styles,
+    }
+
+
+def _xlsx_value_to_text(val: Any) -> str:
+    """Render an openpyxl cell value as a string suitable for x-spreadsheet.
+
+    Formulas come back from openpyxl as their text starting with '=' (when the
+    workbook is loaded without data_only=True), so str(val) is correct.
+    """
+    if isinstance(val, bool):
+        return "TRUE" if val else "FALSE"
+    if isinstance(val, (int, float)):
+        # Integers print without trailing .0; floats keep their natural repr.
+        if isinstance(val, float) and val.is_integer():
+            return str(int(val))
+        return str(val)
+    if isinstance(val, dt.datetime):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(val, dt.date):
+        return val.strftime("%Y-%m-%d")
+    return str(val)
+
+
+def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
+    """Return (cache_key, style_dict) for this cell, or (None, None) if default.
+
+    The cache key is a hashable shape used to dedupe identical styles in the
+    output. The style_dict matches x-spreadsheet's expected shape.
+    """
+    font = cell.font
+    align = cell.alignment
+    fill = cell.fill
+    fmt = cell.number_format
+
+    bold = bool(font and font.bold)
+    italic = bool(font and font.italic)
+    size = int(font.size) if font and font.size else None
+    name = font.name if font and font.name else None
+    fg = _argb_to_hex(font.color.rgb) if font and font.color else None
+
+    halign = align.horizontal if align and align.horizontal in {
+        "left", "center", "right"
+    } else None
+    valign = align.vertical if align and align.vertical in {
+        "top", "middle", "bottom"
+    } else None
+    # openpyxl uses "center" while x-spreadsheet uses "middle" for vertical.
+    if valign == "center":
+        valign = "middle"
+    wrap = bool(align and align.wrap_text)
+
+    bg = None
+    if fill is not None and fill.patternType == "solid":
+        c = fill.fgColor or fill.bgColor
+        if c is not None:
+            bg = _argb_to_hex(c.rgb if c.type == "rgb" else None)
+
+    has_format = fmt and fmt not in {"General", "general", None}
+
+    if not any([bold, italic, size, name, fg, halign, valign, wrap, bg,
+                has_format]):
+        return None, None
+
+    style: dict[str, Any] = {}
+    font_obj: dict[str, Any] = {}
+    if bold:
+        font_obj["bold"] = True
+    if italic:
+        font_obj["italic"] = True
+    if size:
+        font_obj["size"] = size
+    if name:
+        font_obj["name"] = name
+    if font_obj:
+        style["font"] = font_obj
+    if fg:
+        style["color"] = fg
+    if bg:
+        style["bgcolor"] = bg
+    if halign:
+        style["align"] = halign
+    if valign:
+        style["valign"] = valign
+    if wrap:
+        style["textwrap"] = True
+    if has_format:
+        style["format"] = fmt  # raw Excel format string; x-spreadsheet ignores
+                                # unknown ones but we preserve on save.
+
+    key = (
+        bold, italic, size, name, fg, halign, valign, wrap, bg,
+        fmt if has_format else None,
+    )
+    return key, style
+
+
+def _argb_to_hex(rgb: Any) -> Optional[str]:
+    """openpyxl stores colors as 'AARRGGBB'. Return '#RRGGBB' or None."""
+    if not isinstance(rgb, str):
+        return None
+    s = rgb.strip()
+    if len(s) == 8:
+        return "#" + s[2:].lower()
+    if len(s) == 6:
+        return "#" + s.lower()
+    return None
+
+
+def xspreadsheet_to_xlsx_bytes(data: dict) -> bytes:
+    """Convert x-spreadsheet JSON back into an .xlsx workbook (bytes).
+
+    Accepts either a single sheet dict (legacy) or a list of sheets — uses
+    only the first sheet in either case, since we only support one-sheet
+    templates today.
+    """
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (str(data.get("name") or "Sheet1"))[:31]
+
+    styles = data.get("styles") or []
+    rows = data.get("rows") or {}
+    cols = data.get("cols") or {}
+    merges = data.get("merges") or []
+
+    for rk, rv in rows.items():
+        if rk == "len" or not isinstance(rv, dict):
+            continue
+        try:
+            r = int(rk) + 1
+        except (TypeError, ValueError):
+            continue
+        cells = rv.get("cells") or {}
+        for ck, cv in cells.items():
+            if not isinstance(cv, dict):
+                continue
+            try:
+                c = int(ck) + 1
+            except (TypeError, ValueError):
+                continue
+            text = cv.get("text", "")
+            if text == "" or text is None:
+                continue
+            cell = ws.cell(row=r, column=c)
+            cell.value = _text_to_xlsx_value(text)
+            style_idx = cv.get("style")
+            if isinstance(style_idx, int) and 0 <= style_idx < len(styles):
+                _apply_style_to_cell(cell, styles[style_idx])
+        height = rv.get("height")
+        if height:
+            try:
+                ws.row_dimensions[r].height = float(height)
+            except (TypeError, ValueError):
+                pass
+
+    for ck, cv in cols.items():
+        if ck == "len" or not isinstance(cv, dict):
+            continue
+        try:
+            c = int(ck) + 1
+        except (TypeError, ValueError):
+            continue
+        width_px = cv.get("width")
+        if not width_px:
+            continue
+        excel_width = max(2.0, (float(width_px) - 5) / _XSS_PX_PER_WIDTH_UNIT)
+        ws.column_dimensions[get_column_letter(c)].width = excel_width
+
+    for mr in merges:
+        if not isinstance(mr, str):
+            continue
+        try:
+            ws.merge_cells(mr)
+        except (ValueError, TypeError):
+            pass  # malformed range — skip rather than fail the save
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def _text_to_xlsx_value(text: str) -> Any:
+    """Coerce x-spreadsheet cell text into the appropriate openpyxl value.
+
+    - Strings starting with '=' are preserved verbatim so openpyxl writes them
+      as formulas.
+    - Strings that look like plain integers/floats are coerced so the sheet
+      can do arithmetic on them (otherwise SUM() over them won't add up).
+    - Everything else stays as a string. Templates use {{placeholders}} which
+      must remain string literals.
+    """
+    if not isinstance(text, str):
+        return text
+    if text.startswith("="):
+        return text
+    stripped = text.strip()
+    if _looks_numeric(stripped):
+        try:
+            return float(stripped) if "." in stripped else int(stripped)
+        except ValueError:
+            return text
+    return text
+
+
+def _apply_style_to_cell(cell: Cell, style: dict) -> None:
+    if not isinstance(style, dict):
+        return
+    font_src = style.get("font") or {}
+    color = style.get("color")
+    if font_src or color:
+        cell.font = Font(
+            name=font_src.get("name") or cell.font.name,
+            size=font_src.get("size") or cell.font.size,
+            bold=bool(font_src.get("bold")),
+            italic=bool(font_src.get("italic")),
+            color=_hex_to_argb(color) if color else cell.font.color,
+        )
+
+    halign = style.get("align")
+    valign = style.get("valign")
+    if valign == "middle":
+        valign = "center"  # openpyxl spelling
+    wrap = style.get("textwrap")
+    if halign or valign or wrap:
+        cell.alignment = Alignment(
+            horizontal=halign if halign in {"left", "center", "right"} else None,
+            vertical=valign if valign in {"top", "center", "bottom"} else None,
+            wrap_text=bool(wrap),
+        )
+
+    bgcolor = style.get("bgcolor")
+    if bgcolor:
+        argb = _hex_to_argb(bgcolor)
+        if argb:
+            cell.fill = PatternFill("solid", fgColor=argb)
+
+    fmt = style.get("format")
+    if isinstance(fmt, str) and fmt and fmt.lower() != "normal":
+        cell.number_format = fmt
+
+
+def _hex_to_argb(hex_str: Optional[str]) -> Optional[str]:
+    if not isinstance(hex_str, str):
+        return None
+    s = hex_str.strip().lstrip("#")
+    if len(s) == 6:
+        return "FF" + s.upper()
+    if len(s) == 8:
+        return s.upper()
+    return None
+
+
+def sample_po_for_preview() -> SimpleNamespace:
+    """Return an in-memory PurchaseOrder-shaped object for template preview.
+
+    Duck-typed (SimpleNamespace, not a real ORM row) so it never touches the
+    database. render_po_xlsx only reads attributes; it doesn't care that this
+    isn't a real model instance.
+    """
+    items = [
+        SimpleNamespace(
+            name="Widget Alpha", description="Standard widget",
+            model="WA-100", vendor="Acme Corp",
+            vendor_sku="SKU-100", url="https://example.com/wa",
+        ),
+        SimpleNamespace(
+            name="Gadget Beta", description="Premium gadget",
+            model="GB-200", vendor="Acme Corp",
+            vendor_sku="SKU-200", url="https://example.com/gb",
+        ),
+        SimpleNamespace(
+            name="Sprocket Gamma", description="Heavy-duty sprocket",
+            model="SG-300", vendor="Acme Corp",
+            vendor_sku="SKU-300", url="https://example.com/sg",
+        ),
+    ]
+    lines: list[SimpleNamespace] = []
+    for i, (item, qty, cost) in enumerate(
+        zip(items, [10, 2, 4], [12.50, 199.99, 45.00]), start=1
+    ):
+        line = SimpleNamespace(
+            id=i, qty=qty, unit_cost=cost, line_no=i, notes="", item=item,
+        )
+        line.line_total = qty * cost
+        lines.append(line)
+    po = SimpleNamespace(
+        po_number="PREVIEW-001",
+        vendor="Acme Corp",
+        ship_to="123 Main St, Anytown USA",
+        notes="This is a preview rendered with sample data.",
+        ordered_at=None,
+        created_at=dt.datetime.now(),
+        lines=lines,
+    )
+    po.total = sum(l.line_total for l in lines)
+    return po
