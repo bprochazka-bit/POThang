@@ -3,12 +3,14 @@ Service-layer helpers. Anything that's more than a CRUD operation lives here.
 """
 from __future__ import annotations
 
+import colorsys
 import datetime as dt
 import hashlib
 import io
 import os
 import re
 import shutil
+import xml.etree.ElementTree as ET
 from copy import copy
 from pathlib import Path
 from types import SimpleNamespace
@@ -633,10 +635,11 @@ def xlsx_bytes_to_xspreadsheet(xlsx_bytes: bytes) -> dict:
     """Convert an .xlsx workbook (bytes) into x-spreadsheet JSON for editing."""
     wb = load_workbook(io.BytesIO(xlsx_bytes))
     ws = wb.active
-    return _worksheet_to_xspreadsheet(ws)
+    palette = _load_theme_palette(wb)
+    return _worksheet_to_xspreadsheet(ws, palette)
 
 
-def _worksheet_to_xspreadsheet(ws: Worksheet) -> dict:
+def _worksheet_to_xspreadsheet(ws: Worksheet, palette: dict) -> dict:
     rows: dict[str, Any] = {}
     styles: list[dict] = []
     style_cache: dict[tuple, int] = {}
@@ -654,7 +657,7 @@ def _worksheet_to_xspreadsheet(ws: Worksheet) -> dict:
                 # (keeps the JSON small).
                 continue
             cell_data: dict[str, Any] = {"text": _xlsx_value_to_text(val)}
-            key, style_obj = _cell_style_signature(cell)
+            key, style_obj = _cell_style_signature(cell, palette)
             if style_obj is not None:
                 if key not in style_cache:
                     style_cache[key] = len(styles)
@@ -733,7 +736,9 @@ def _xlsx_value_to_text(val: Any) -> str:
     return str(val)
 
 
-def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
+def _cell_style_signature(
+    cell: Cell, palette: dict,
+) -> tuple[Optional[tuple], Optional[dict]]:
     """Return (cache_key, style_dict) for this cell, or (None, None) if default.
 
     The cache key is a hashable shape used to dedupe identical styles in the
@@ -748,7 +753,7 @@ def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
     italic = bool(font and font.italic)
     size = int(font.size) if font and font.size else None
     name = font.name if font and font.name else None
-    fg = _color_to_hex(font.color) if font else None
+    fg = _color_to_hex(font.color, palette) if font else None
 
     halign = align.horizontal if align and align.horizontal in {
         "left", "center", "right"
@@ -763,12 +768,17 @@ def _cell_style_signature(cell: Cell) -> tuple[Optional[tuple], Optional[dict]]:
 
     bg = None
     if fill is not None and fill.patternType == "solid":
-        bg = _color_to_hex(fill.fgColor) or _color_to_hex(fill.bgColor)
+        bg = (_color_to_hex(fill.fgColor, palette)
+              or _color_to_hex(fill.bgColor, palette))
+    elif fill is not None and fill.patternType:
+        # Non-solid patterns (gray125, lightUp, etc.) — approximate with the
+        # pattern's foreground so shaded cells at least show *something*.
+        bg = _color_to_hex(fill.fgColor, palette)
 
     has_format = fmt and fmt not in {"General", "general", None}
     xss_fmt = _excel_to_xss_format(fmt) if has_format else None
 
-    border_obj = _cell_border_to_xss(cell)
+    border_obj = _cell_border_to_xss(cell, palette)
 
     if not any([bold, italic, size, name, fg, halign, valign, wrap, bg,
                 xss_fmt, has_format, border_obj]):
@@ -830,28 +840,24 @@ _OPENPYXL_TO_XSS_BORDER = {
 }
 
 
-def _side_to_xss(side: Any) -> Optional[list]:
+def _side_to_xss(side: Any, palette: dict) -> Optional[list]:
     """Convert an openpyxl Side to x-spreadsheet's ['style', '#color'] tuple."""
     if side is None or not getattr(side, "style", None):
         return None
     style = _OPENPYXL_TO_XSS_BORDER.get(side.style, "thin")
-    color = "#000000"
-    if side.color is not None:
-        hex_ = _argb_to_hex(side.color.rgb if side.color.type == "rgb" else None)
-        if hex_:
-            color = hex_
+    color = _color_to_hex(side.color, palette) or "#000000"
     return [style, color]
 
 
-def _cell_border_to_xss(cell: Cell) -> Optional[dict]:
+def _cell_border_to_xss(cell: Cell, palette: dict) -> Optional[dict]:
     """Return an x-spreadsheet border dict, or None if the cell has no borders."""
     border = cell.border
     if border is None:
         return None
-    top = _side_to_xss(border.top)
-    bottom = _side_to_xss(border.bottom)
-    left = _side_to_xss(border.left)
-    right = _side_to_xss(border.right)
+    top = _side_to_xss(border.top, palette)
+    bottom = _side_to_xss(border.bottom, palette)
+    left = _side_to_xss(border.left, palette)
+    right = _side_to_xss(border.right, palette)
     if not any([top, bottom, left, right]):
         return None
     out: dict[str, list] = {}
@@ -976,30 +982,113 @@ _INDEXED_COLOR_RGB = {
 }
 
 
-def _color_to_hex(color: Any) -> Optional[str]:
+# The clrScheme children appear in the theme XML as dk1, lt1, dk2, lt2,
+# accent1-6, hlink, folHlink. openpyxl's Color(theme=N) index, however,
+# swaps the first two pairs: 0=lt1, 1=dk1, 2=lt2, 3=dk2, then 4..9 accents,
+# 10 hlink, 11 folHlink. This maps XML position -> theme index.
+_THEME_XML_ORDER_TO_INDEX = {0: 1, 1: 0, 2: 3, 3: 2,
+                             4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
+                             10: 10, 11: 11}
+
+_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+def _load_theme_palette(wb: Any) -> dict:
+    """Parse the workbook's theme1.xml into {theme_index: '#rrggbb'}.
+
+    Falls back to the default Office palette for any slot we can't read.
+    Custom corporate templates frequently ship their own theme, so reading
+    the real one (rather than assuming Office defaults) is what makes their
+    fills/borders show the right colour.
+    """
+    palette = dict(_OFFICE_THEME_RGB)
+    raw = getattr(wb, "loaded_theme", None)
+    if not raw:
+        return palette
+    try:
+        if isinstance(raw, bytes):
+            root = ET.fromstring(raw)
+        else:
+            root = ET.fromstring(raw.encode("utf-8"))
+    except ET.ParseError:
+        return palette
+
+    scheme = root.find(f".//{_A_NS}clrScheme")
+    if scheme is None:
+        return palette
+
+    for pos, child in enumerate(list(scheme)):
+        idx = _THEME_XML_ORDER_TO_INDEX.get(pos)
+        if idx is None:
+            continue
+        srgb = child.find(f"{_A_NS}srgbClr")
+        sysclr = child.find(f"{_A_NS}sysClr")
+        hexval = None
+        if srgb is not None and srgb.get("val"):
+            hexval = srgb.get("val")
+        elif sysclr is not None:
+            hexval = sysclr.get("lastClr") or sysclr.get("val")
+        if hexval and re.fullmatch(r"[0-9A-Fa-f]{6}", hexval):
+            palette[idx] = "#" + hexval.lower()
+    return palette
+
+
+def _apply_tint(hex_color: str, tint: float) -> str:
+    """Apply the OOXML tint factor to a '#rrggbb' colour.
+
+    Excel stores subtle shades ("white, darker 15%") as a base theme colour
+    plus a tint in [-1, 1]. Ignoring the tint is why a light-grey fill was
+    coming through as pure white (invisible). Algorithm per ECMA-376: adjust
+    the HSL luminance.
+    """
+    if not tint:
+        return hex_color
+    s = hex_color.lstrip("#")
+    if len(s) != 6:
+        return hex_color
+    r, g, b = (int(s[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    h, l, sat = colorsys.rgb_to_hls(r, g, b)
+    if tint < 0:
+        l = l * (1.0 + tint)
+    else:
+        l = l * (1.0 - tint) + tint
+    l = min(1.0, max(0.0, l))
+    r, g, b = colorsys.hls_to_rgb(h, l, sat)
+    return "#%02x%02x%02x" % (
+        round(r * 255), round(g * 255), round(b * 255),
+    )
+
+
+def _color_to_hex(color: Any, palette: dict) -> Optional[str]:
     """Resolve an openpyxl Color to a '#rrggbb' string, regardless of its type.
 
-    Handles type='rgb' (the easy case), type='theme' (mapped through the
-    default Office palette), and type='indexed' (legacy palette). Returns
+    Handles type='rgb', 'theme' (resolved against the workbook's actual
+    palette, with tint applied), and 'indexed' (legacy palette). Returns
     None if we can't recover any usable colour.
     """
     if color is None:
         return None
     ctype = getattr(color, "type", None)
+    tint = getattr(color, "tint", 0.0) or 0.0
+
     if ctype == "rgb":
-        return _argb_to_hex(getattr(color, "rgb", None))
+        base = _argb_to_hex(getattr(color, "rgb", None))
+        return _apply_tint(base, tint) if base else None
     if ctype == "theme":
         theme_idx = getattr(color, "theme", None)
         if isinstance(theme_idx, int):
-            return _OFFICE_THEME_RGB.get(theme_idx)
+            base = palette.get(theme_idx) or _OFFICE_THEME_RGB.get(theme_idx)
+            return _apply_tint(base, tint) if base else None
         return None
     if ctype == "indexed":
         idx = getattr(color, "indexed", None)
         if isinstance(idx, int):
-            return _INDEXED_COLOR_RGB.get(idx)
+            base = _INDEXED_COLOR_RGB.get(idx)
+            return _apply_tint(base, tint) if base else None
         return None
     # auto / unset / unknown
-    return _argb_to_hex(getattr(color, "rgb", None))
+    base = _argb_to_hex(getattr(color, "rgb", None))
+    return _apply_tint(base, tint) if base else None
 
 
 def xspreadsheet_to_xlsx_bytes(data: dict) -> bytes:
