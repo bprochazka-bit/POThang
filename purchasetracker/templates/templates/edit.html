@@ -5,12 +5,12 @@
 {% endblock %}
 {% block content %}
 
-{# x-spreadsheet CSS + JS via CDN. The app is otherwise no-bundler vanilla
-   JS; to use this offline, vendor these two files into static/ and swap the
-   URLs. #}
+{# x-spreadsheet CSS + JS, vendored locally so the editor works offline.
+   Source: https://github.com/myliang/x-spreadsheet (MIT). Update by replacing
+   the two files in static/vendor/xspreadsheet/. #}
 <link rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/x-data-spreadsheet@1.1.9/dist/xspreadsheet.css">
-<script src="https://cdn.jsdelivr.net/npm/x-data-spreadsheet@1.1.9/dist/xspreadsheet.js"></script>
+      href="{{ url_for('static', filename='vendor/xspreadsheet/xspreadsheet.css') }}">
+<script src="{{ url_for('static', filename='vendor/xspreadsheet/xspreadsheet.js') }}"></script>
 
 <style>
   /* Force x-spreadsheet's white surfaces onto a contrasting frame so the
@@ -111,7 +111,7 @@
   // Editor instance -------------------------------------------------------
   var Spreadsheet = window.x_spreadsheet;
   if (!Spreadsheet) {
-    setStatus('Spreadsheet library failed to load. Check network access to jsdelivr.', 'error');
+    setStatus('Spreadsheet library failed to load. Check that static/vendor/xspreadsheet/ is present.', 'error');
     return;
   }
 
