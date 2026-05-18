@@ -139,9 +139,12 @@
   <div class="tpl-zoomwrap"><div class="tpl-editor-wrap"><div id="preview-sheet"></div></div></div>
   <p><small>Preview is rendered with a synthetic PO
   (<code>PREVIEW-001</code>, vendor &ldquo;Acme Corp&rdquo;, three sample
-  items). Formula results are computed client-side by the editor&rsquo;s own
-  formula engine, which covers common functions but is not a full Excel
-  implementation.</small></p>
+  items) so you can check layout, merged cells, colours and that
+  <code>&#123;&#123;placeholders&#125;&#125;</code> &mdash; including
+  formula references like <code>=SUM(I23:I&#123;&#123;items.last_row&#125;&#125;)</code>
+  &mdash; expand correctly. Formulas are shown as written, not computed;
+  open the downloaded xlsx in Excel or LibreOffice for calculated
+  values.</small></p>
 </div>
 
 <script>
@@ -191,6 +194,12 @@
     showToolbar: true,
     showGrid: true,
     showContextmenu: true,
+    // Show formulas literally instead of evaluating them. x-spreadsheet's
+    // mini engine only knows 8 functions and has no error handling, so
+    // template formulas (with {{tokens}} or INDIRECT/ADDRESS/ROW/COLUMN)
+    // would throw mid-render and corrupt the grid. Authoring a template
+    // means editing the formula text anyway, not its (dataless) result.
+    evalPaused: true,
     view: {
       height: function () { return Math.max(520, window.innerHeight - 320); },
       width: function () { return editEl.clientWidth - 12; },
@@ -204,6 +213,11 @@
     showToolbar: false,
     showGrid: true,
     showContextmenu: false,
+    // Same reason: after server-side render a template may still contain
+    // INDIRECT/ADDRESS/etc. that x-spreadsheet can't evaluate without
+    // crashing. Show the rendered formulas as written; for computed
+    // values open the downloaded xlsx in Excel/LibreOffice.
+    evalPaused: true,
     view: {
       height: function () { return Math.max(520, window.innerHeight - 360); },
       width: function () { return previewEl.clientWidth - 12; },
