@@ -328,6 +328,15 @@ _LOOP_CLOSE_RE = re.compile(r"\{\{\s*/\s*items\s*\}\}")
 _IF_OPEN_RE = re.compile(r"\{\{\s*#\s*if\s+([a-zA-Z0-9_.]+)\s*\}\}")
 _ELSE_RE = re.compile(r"\{\{\s*else\s*\}\}")
 _IF_CLOSE_RE = re.compile(r"\{\{\s*/\s*if\s*\}\}")
+# {{relative:DR:DC}} — a cell reference relative to the cell the token sits
+# in, resolved to a concrete A1 address at render time (after loop
+# expansion). DR/DC are signed row/column offsets. Example: in cell I26,
+# {{relative:-3:0}} -> I23, {{relative:-1:0}} -> I25. This is the portable
+# stand-in for INDIRECT(ADDRESS(ROW()+DR, COLUMN()+DC)), which the in-browser
+# editor can't evaluate.
+_RELATIVE_RE = re.compile(
+    r"\{\{\s*relative\s*:\s*(-?\d+)\s*:\s*(-?\d+)\s*\}\}"
+)
 
 
 def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes,
@@ -356,6 +365,11 @@ def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes,
         =SUM({{items.range.E}}) -> =SUM(E5:E10). Companion tokens
         {{items.first_row}}, {{items.last_row}}, {{items.count}} are also
         available, and {{#if items}}...{{/if}} guards against empty POs.
+      - {{relative:DR:DC}} expands to an A1 reference offset from the cell
+        it sits in (DR/DC are signed row/column deltas), resolved against
+        the cell's final post-expansion position. It's the portable
+        replacement for INDIRECT(ADDRESS(ROW()+DR,COLUMN()+DC)) — e.g. in
+        cell I26, =SUM({{relative:-3:0}}:{{relative:-1:0}}) -> =SUM(I23:I25).
 
     Lines are ordered by their stable line_no so the # column in the rendered
     document matches what the user sees in the web UI.
@@ -462,8 +476,11 @@ def _resolve_conditionals(text: str, ctx: dict) -> str:
     return "".join(result)
 
 
-def _substitute(text: str, ctx: dict) -> str:
+def _substitute(text: str, ctx: dict,
+                cell_row: Optional[int] = None,
+                cell_col: Optional[int] = None) -> str:
     text = _resolve_conditionals(text, ctx)
+    text = _resolve_relative(text, cell_row, cell_col)
 
     def repl(m):
         key = m.group(1)
@@ -474,6 +491,32 @@ def _substitute(text: str, ctx: dict) -> str:
             return m.group(0)  # leave unknown placeholders untouched
         return str(val)
     return _PLACEHOLDER_RE.sub(repl, text)
+
+
+def _resolve_relative(text: str, cell_row: Optional[int],
+                      cell_col: Optional[int]) -> str:
+    """Expand {{relative:DR:DC}} into an A1 reference for this cell.
+
+    cell_row/cell_col are 1-indexed (openpyxl convention). Resolution
+    happens against the cell's FINAL position, so a token in a loop-template
+    cell points at the right address once the row has been replicated, and a
+    token in a cell below the items block (e.g. a SUBTOTAL formula) resolves
+    against the post-expansion layout.
+
+    An offset that lands outside the sheet (row/col < 1) is left as the raw
+    token, consistent with how unknown placeholders are treated.
+    """
+    if cell_row is None or cell_col is None or "{{" not in text:
+        return text
+
+    def repl(m):
+        r = cell_row + int(m.group(1))
+        c = cell_col + int(m.group(2))
+        if r < 1 or c < 1:
+            return m.group(0)
+        return f"{get_column_letter(c)}{r}"
+
+    return _RELATIVE_RE.sub(repl, text)
 
 
 def _resolve_items_range(col: str, ctx: dict, original: str) -> str:
@@ -496,7 +539,8 @@ def _resolve_items_range(col: str, ctx: dict, original: str) -> str:
 def _cell_substitute(cell: Cell, ctx: dict) -> None:
     if not isinstance(cell.value, str):
         return
-    new = _substitute(cell.value, ctx)
+    new = _substitute(cell.value, ctx,
+                       cell_row=cell.row, cell_col=cell.column)
     if new != cell.value:
         # If the new value is a number and the placeholder was the only
         # content, coerce to a number so the spreadsheet can sum it.
@@ -623,7 +667,9 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> Optional[dict]:
                 cell = ws.cell(row=write_row, column=col_idx)
                 value = src["value"]
                 if isinstance(value, str):
-                    value = _substitute(value, ctx)
+                    value = _substitute(value, ctx,
+                                        cell_row=write_row,
+                                        cell_col=col_idx)
                     if _looks_numeric(value.strip()):
                         try:
                             value = (float(value) if "." in value
