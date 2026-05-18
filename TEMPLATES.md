@@ -90,7 +90,17 @@ opener, body, and closer are all in the same cell's text.
 | `{{items.last_row}}`   | Anywhere            | Last row of the expanded items block. `""` if empty PO.     |
 | `{{items.count}}`      | Anywhere            | Number of line items (integer).                             |
 | `{{items.range.X}}`    | Anywhere            | `X<first_row>:X<last_row>` (e.g. `E5:E10`). `0` on empty PO.|
+| `{{relative:DR:DC}}`   | Anywhere            | A1 reference offset `DR` rows / `DC` cols from this cell.   |
 | `{{#if items}}…{{/if}}`| Anywhere            | True iff the PO has at least one line.                      |
+
+`{{relative:DR:DC}}` is the portable replacement for
+`INDIRECT(ADDRESS(ROW()+DR, COLUMN()+DC))` — the in-browser editor
+cannot evaluate `INDIRECT`/`ADDRESS`, so use this token instead. `DR`
+and `DC` are signed offsets resolved against the cell's **final**
+position (after the items block has expanded). Example: in cell `I26`,
+`=SUM({{relative:-3:0}}:{{relative:-1:0}})` becomes `=SUM(I23:I25)`. An
+offset that lands off-sheet (row/col &lt; 1) is left as the literal
+token.
 
 `{{items.range.X}}` accepts any column letter, including multi-letter
 columns (`AA`, `BC`, …). The collapse-to-`0` behaviour means

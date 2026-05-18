@@ -3,19 +3,24 @@ Service-layer helpers. Anything that's more than a CRUD operation lives here.
 """
 from __future__ import annotations
 
+import colorsys
+import datetime as dt
 import hashlib
 import io
 import os
 import re
 import shutil
+import xml.etree.ElementTree as ET
 from copy import copy
 from pathlib import Path
-from typing import BinaryIO, Iterable, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, BinaryIO, Iterable, Optional, Tuple
 
 from flask import current_app
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .extensions import db
@@ -323,6 +328,15 @@ _LOOP_CLOSE_RE = re.compile(r"\{\{\s*/\s*items\s*\}\}")
 _IF_OPEN_RE = re.compile(r"\{\{\s*#\s*if\s+([a-zA-Z0-9_.]+)\s*\}\}")
 _ELSE_RE = re.compile(r"\{\{\s*else\s*\}\}")
 _IF_CLOSE_RE = re.compile(r"\{\{\s*/\s*if\s*\}\}")
+# {{relative:DR:DC}} — a cell reference relative to the cell the token sits
+# in, resolved to a concrete A1 address at render time (after loop
+# expansion). DR/DC are signed row/column offsets. Example: in cell I26,
+# {{relative:-3:0}} -> I23, {{relative:-1:0}} -> I25. This is the portable
+# stand-in for INDIRECT(ADDRESS(ROW()+DR, COLUMN()+DC)), which the in-browser
+# editor can't evaluate.
+_RELATIVE_RE = re.compile(
+    r"\{\{\s*relative\s*:\s*(-?\d+)\s*:\s*(-?\d+)\s*\}\}"
+)
 
 
 def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes,
@@ -351,6 +365,11 @@ def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes,
         =SUM({{items.range.E}}) -> =SUM(E5:E10). Companion tokens
         {{items.first_row}}, {{items.last_row}}, {{items.count}} are also
         available, and {{#if items}}...{{/if}} guards against empty POs.
+      - {{relative:DR:DC}} expands to an A1 reference offset from the cell
+        it sits in (DR/DC are signed row/column deltas), resolved against
+        the cell's final post-expansion position. It's the portable
+        replacement for INDIRECT(ADDRESS(ROW()+DR,COLUMN()+DC)) — e.g. in
+        cell I26, =SUM({{relative:-3:0}}:{{relative:-1:0}}) -> =SUM(I23:I25).
 
     Lines are ordered by their stable line_no so the # column in the rendered
     document matches what the user sees in the web UI.
@@ -457,8 +476,11 @@ def _resolve_conditionals(text: str, ctx: dict) -> str:
     return "".join(result)
 
 
-def _substitute(text: str, ctx: dict) -> str:
+def _substitute(text: str, ctx: dict,
+                cell_row: Optional[int] = None,
+                cell_col: Optional[int] = None) -> str:
     text = _resolve_conditionals(text, ctx)
+    text = _resolve_relative(text, cell_row, cell_col)
 
     def repl(m):
         key = m.group(1)
@@ -469,6 +491,32 @@ def _substitute(text: str, ctx: dict) -> str:
             return m.group(0)  # leave unknown placeholders untouched
         return str(val)
     return _PLACEHOLDER_RE.sub(repl, text)
+
+
+def _resolve_relative(text: str, cell_row: Optional[int],
+                      cell_col: Optional[int]) -> str:
+    """Expand {{relative:DR:DC}} into an A1 reference for this cell.
+
+    cell_row/cell_col are 1-indexed (openpyxl convention). Resolution
+    happens against the cell's FINAL position, so a token in a loop-template
+    cell points at the right address once the row has been replicated, and a
+    token in a cell below the items block (e.g. a SUBTOTAL formula) resolves
+    against the post-expansion layout.
+
+    An offset that lands outside the sheet (row/col < 1) is left as the raw
+    token, consistent with how unknown placeholders are treated.
+    """
+    if cell_row is None or cell_col is None or "{{" not in text:
+        return text
+
+    def repl(m):
+        r = cell_row + int(m.group(1))
+        c = cell_col + int(m.group(2))
+        if r < 1 or c < 1:
+            return m.group(0)
+        return f"{get_column_letter(c)}{r}"
+
+    return _RELATIVE_RE.sub(repl, text)
 
 
 def _resolve_items_range(col: str, ctx: dict, original: str) -> str:
@@ -491,7 +539,8 @@ def _resolve_items_range(col: str, ctx: dict, original: str) -> str:
 def _cell_substitute(cell: Cell, ctx: dict) -> None:
     if not isinstance(cell.value, str):
         return
-    new = _substitute(cell.value, ctx)
+    new = _substitute(cell.value, ctx,
+                       cell_row=cell.row, cell_col=cell.column)
     if new != cell.value:
         # If the new value is a number and the placeholder was the only
         # content, coerce to a number so the spreadsheet can sum it.
@@ -618,7 +667,9 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> Optional[dict]:
                 cell = ws.cell(row=write_row, column=col_idx)
                 value = src["value"]
                 if isinstance(value, str):
-                    value = _substitute(value, ctx)
+                    value = _substitute(value, ctx,
+                                        cell_row=write_row,
+                                        cell_col=col_idx)
                     if _looks_numeric(value.strip()):
                         try:
                             value = (float(value) if "." in value
@@ -672,3 +723,744 @@ def _reapply_external_merges(
         else:
             continue  # overlapped the loop block — drop it
         ws.merge_cells(start_row=min_r, end_row=max_r, start_column=min_c, end_column=max_c)
+
+
+# ---------- xlsx <-> x-spreadsheet JSON (template editor) ----------
+#
+# The template editor in the web UI uses x-spreadsheet, a vanilla-JS
+# spreadsheet component. It loads and emits a JSON document with this rough
+# shape:
+#
+#   {
+#     "name": "Sheet1",
+#     "rows": { "0": { "cells": { "0": {"text": "Hi", "style": 0} },
+#                       "height": 24 }, "len": 100 },
+#     "cols": { "0": {"width": 120}, "len": 26 },
+#     "merges": ["A1:B2"],
+#     "styles": [ {"font": {"bold": true}, "bgcolor": "#fff", ...} ]
+#   }
+#
+# We only model the subset of cell properties that round-trip cleanly: text
+# (including formulas as "=…"), basic font, alignment, background fill,
+# number format, merges, column widths, row heights. Anything else from the
+# source xlsx is dropped on the edit/save round trip — documented in the UI.
+
+_XSS_PX_PER_WIDTH_UNIT = 7  # rough Excel char-width → pixels conversion
+
+
+def xlsx_bytes_to_xspreadsheet(xlsx_bytes: bytes) -> dict:
+    """Convert an .xlsx workbook (bytes) into x-spreadsheet JSON for editing."""
+    wb = load_workbook(io.BytesIO(xlsx_bytes))
+    ws = wb.active
+    palette = _load_theme_palette(wb)
+    return _worksheet_to_xspreadsheet(ws, palette)
+
+
+def _worksheet_to_xspreadsheet(ws: Worksheet, palette: dict) -> dict:
+    rows: dict[str, Any] = {}
+    styles: list[dict] = []
+    style_cache: dict[tuple, int] = {}
+
+    max_r = max(ws.max_row or 1, 1)
+    max_c = max(ws.max_column or 1, 1)
+
+    for r in range(1, max_r + 1):
+        row_cells: dict[str, Any] = {}
+        for c in range(1, max_c + 1):
+            cell = ws.cell(row=r, column=c)
+            val = cell.value
+            has_text = val is not None and val != ""
+            key, style_obj = _cell_style_signature(cell, palette)
+            # Emit a cell if it has text OR a non-default style. Blank-but-
+            # styled cells (coloured input boxes, bordered spacers, the BILL
+            # TO block, the purple barcode cells) MUST be kept — skipping
+            # them was why large swathes of the form rendered uncoloured.
+            if not has_text and style_obj is None:
+                continue
+            cell_data: dict[str, Any] = {
+                "text": _xlsx_value_to_text(val) if has_text else "",
+            }
+            if style_obj is not None:
+                if key not in style_cache:
+                    style_cache[key] = len(styles)
+                    styles.append(style_obj)
+                cell_data["style"] = style_cache[key]
+            row_cells[str(c - 1)] = cell_data
+        rd = ws.row_dimensions.get(r)
+        height = rd.height if rd is not None and rd.height else None
+        if row_cells or height:
+            row_obj: dict[str, Any] = {}
+            if row_cells:
+                row_obj["cells"] = row_cells
+            if height:
+                row_obj["height"] = float(height)
+            rows[str(r - 1)] = row_obj
+    rows["len"] = max(max_r + 10, 100)
+
+    # Emit a width for EVERY column up to max_c, not just ones with an
+    # explicit width. Excel's default is ~8.43 chars; if we leave default
+    # columns out, x-spreadsheet falls back to its own (different) default
+    # and the whole form's proportions drift — narrow columns wrapped text
+    # ("MODEL/S KU") while others stretched.
+    default_w = None
+    sf = getattr(ws, "sheet_format", None)
+    if sf is not None and getattr(sf, "defaultColWidth", None):
+        default_w = sf.defaultColWidth
+    if not default_w:
+        default_w = 8.43
+
+    cols: dict[str, Any] = {}
+    for c in range(1, max_c + 1):
+        letter = get_column_letter(c)
+        dim = ws.column_dimensions.get(letter)
+        w = dim.width if dim is not None and dim.width else default_w
+        cols[str(c - 1)] = {
+            "width": int(round(w * _XSS_PX_PER_WIDTH_UNIT + 5))
+        }
+    cols["len"] = max(max_c + 5, 26)
+
+    merges = [str(mr) for mr in ws.merged_cells.ranges]
+
+    # x-spreadsheet needs a merge declared in TWO places: the `merges` array
+    # (drives range selection) AND a `merge: [extraRows, extraCols]` property
+    # on the anchor (top-left) cell (drives the grid actually spanning the
+    # cells). Without the latter the range highlights on click but renders as
+    # separate cells — exactly the inconsistency this annotation fixes.
+    for mr in ws.merged_cells.ranges:
+        min_r, min_c = mr.min_row, mr.min_col
+        extra_rows = mr.max_row - min_r
+        extra_cols = mr.max_col - min_c
+        if extra_rows == 0 and extra_cols == 0:
+            continue
+        rkey, ckey = str(min_r - 1), str(min_c - 1)
+        row_obj = rows.setdefault(rkey, {})
+        cells = row_obj.setdefault("cells", {})
+        anchor = cells.setdefault(ckey, {"text": ""})
+        anchor["merge"] = [extra_rows, extra_cols]
+
+    return {
+        "name": (ws.title or "Sheet1")[:31],
+        "rows": rows,
+        "cols": cols,
+        "merges": merges,
+        "styles": styles,
+    }
+
+
+def _xlsx_value_to_text(val: Any) -> str:
+    """Render an openpyxl cell value as a string suitable for x-spreadsheet.
+
+    Formulas come back from openpyxl as their text starting with '=' (when the
+    workbook is loaded without data_only=True), so str(val) is correct.
+    """
+    if isinstance(val, bool):
+        return "TRUE" if val else "FALSE"
+    if isinstance(val, (int, float)):
+        # Integers print without trailing .0; floats keep their natural repr.
+        if isinstance(val, float) and val.is_integer():
+            return str(int(val))
+        return str(val)
+    if isinstance(val, dt.datetime):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(val, dt.date):
+        return val.strftime("%Y-%m-%d")
+    return str(val)
+
+
+def _cell_style_signature(
+    cell: Cell, palette: dict,
+) -> tuple[Optional[tuple], Optional[dict]]:
+    """Return (cache_key, style_dict) for this cell, or (None, None) if default.
+
+    The cache key is a hashable shape used to dedupe identical styles in the
+    output. The style_dict matches x-spreadsheet's expected shape.
+    """
+    font = cell.font
+    align = cell.alignment
+    fill = cell.fill
+    fmt = cell.number_format
+
+    bold = bool(font and font.bold)
+    italic = bool(font and font.italic)
+    size = int(font.size) if font and font.size else None
+    name = font.name if font and font.name else None
+    fg = _color_to_hex(font.color, palette) if font else None
+
+    halign = align.horizontal if align and align.horizontal in {
+        "left", "center", "right"
+    } else None
+    valign = align.vertical if align and align.vertical in {
+        "top", "middle", "bottom"
+    } else None
+    # openpyxl uses "center" while x-spreadsheet uses "middle" for vertical.
+    if valign == "center":
+        valign = "middle"
+    wrap = bool(align and align.wrap_text)
+
+    bg = None
+    if fill is not None and fill.patternType == "solid":
+        bg = (_color_to_hex(fill.fgColor, palette)
+              or _color_to_hex(fill.bgColor, palette))
+    elif fill is not None and fill.patternType:
+        # Non-solid patterns (gray125, lightUp, etc.) — approximate with the
+        # pattern's foreground so shaded cells at least show *something*.
+        bg = _color_to_hex(fill.fgColor, palette)
+
+    has_format = fmt and fmt not in {"General", "general", None}
+    xss_fmt = _excel_to_xss_format(fmt) if has_format else None
+
+    border_obj = _cell_border_to_xss(cell, palette)
+
+    if not any([bold, italic, size, name, fg, halign, valign, wrap, bg,
+                xss_fmt, has_format, border_obj]):
+        return None, None
+
+    style: dict[str, Any] = {}
+    font_obj: dict[str, Any] = {}
+    if bold:
+        font_obj["bold"] = True
+    if italic:
+        font_obj["italic"] = True
+    if size:
+        font_obj["size"] = size
+    if name:
+        font_obj["name"] = name
+    if font_obj:
+        style["font"] = font_obj
+    if fg:
+        style["color"] = fg
+    if bg:
+        style["bgcolor"] = bg
+    if halign:
+        style["align"] = halign
+    if valign:
+        style["valign"] = valign
+    if wrap:
+        style["textwrap"] = True
+    if xss_fmt:
+        # Must be one of x-spreadsheet's known format keys, otherwise the
+        # editor crashes during render (it does formats[style.format].render).
+        style["format"] = xss_fmt
+    if has_format:
+        # Stash the original Excel format string under a non-conflicting key
+        # so we can restore it exactly on save (x-spreadsheet only looks up
+        # `style.format`, so unknown keys are safe).
+        style["xlsxFormat"] = fmt
+    if border_obj:
+        style["border"] = border_obj
+
+    key = (
+        bold, italic, size, name, fg, halign, valign, wrap, bg,
+        fmt if has_format else None,
+        _border_cache_key(border_obj),
+    )
+    return key, style
+
+
+# Border styles x-spreadsheet renders natively. Anything else from openpyxl
+# is mapped to the closest visual equivalent.
+_XSS_BORDER_STYLES = {"thin", "medium", "thick", "dashed", "dotted", "double"}
+
+# openpyxl side style → x-spreadsheet side style.
+_OPENPYXL_TO_XSS_BORDER = {
+    "thin": "thin", "medium": "medium", "thick": "thick",
+    "dashed": "dashed", "dotted": "dotted", "double": "double",
+    "hair": "thin", "dashDot": "dashed", "dashDotDot": "dashed",
+    "mediumDashed": "medium", "mediumDashDot": "medium",
+    "mediumDashDotDot": "medium", "slantDashDot": "dashed",
+}
+
+
+def _side_to_xss(side: Any, palette: dict) -> Optional[list]:
+    """Convert an openpyxl Side to x-spreadsheet's ['style', '#color'] tuple."""
+    if side is None or not getattr(side, "style", None):
+        return None
+    style = _OPENPYXL_TO_XSS_BORDER.get(side.style, "thin")
+    color = _color_to_hex(side.color, palette) or "#000000"
+    return [style, color]
+
+
+def _cell_border_to_xss(cell: Cell, palette: dict) -> Optional[dict]:
+    """Return an x-spreadsheet border dict, or None if the cell has no borders."""
+    border = cell.border
+    if border is None:
+        return None
+    top = _side_to_xss(border.top, palette)
+    bottom = _side_to_xss(border.bottom, palette)
+    left = _side_to_xss(border.left, palette)
+    right = _side_to_xss(border.right, palette)
+    if not any([top, bottom, left, right]):
+        return None
+    out: dict[str, list] = {}
+    if top:    out["top"] = top
+    if bottom: out["bottom"] = bottom
+    if left:   out["left"] = left
+    if right:  out["right"] = right
+    return out
+
+
+def _border_cache_key(border_obj: Optional[dict]) -> Optional[tuple]:
+    if not border_obj:
+        return None
+    return tuple(
+        (k, tuple(v)) for k, v in sorted(border_obj.items())
+    )
+
+
+# Mapping between Excel number formats and x-spreadsheet's named formats.
+# x-spreadsheet's known names: normal, text, number, percent, rmb, usd, eur,
+# date, time, datetime, duration. Any other value passed as style.format
+# causes a runtime crash, so we MUST translate.
+_XSS_NAMED_FORMATS = {
+    "normal", "text", "number", "percent",
+    "rmb", "usd", "eur", "date", "time", "datetime", "duration",
+}
+
+
+def _excel_to_xss_format(fmt: Optional[str]) -> Optional[str]:
+    """Map an Excel number format string to x-spreadsheet's nearest named format.
+
+    Returns None for formats we don't recognise — the caller should then omit
+    `style.format` entirely (the raw Excel format string is preserved under
+    `style.xlsxFormat` so the round-trip back to xlsx is lossless).
+    """
+    if not fmt:
+        return None
+    f = fmt.lower()
+    if f in _XSS_NAMED_FORMATS:
+        return f
+    if "$" in fmt:
+        return "usd"
+    if "€" in fmt:
+        return "eur"
+    if "¥" in fmt or "rmb" in f:
+        return "rmb"
+    if "%" in fmt:
+        return "percent"
+    # Date/time detection: openpyxl format strings use y/m/d/h tokens.
+    has_date = any(tok in f for tok in ("yyyy", "yy", "mmm", "dd", "m/d"))
+    has_time = "h" in f and "m" in f  # "hh:mm" patterns
+    if has_date and has_time:
+        return "datetime"
+    if has_date:
+        return "date"
+    if has_time:
+        return "time"
+    if any(ch in fmt for ch in "0#"):
+        return "number"
+    return None
+
+
+# Reverse mapping used when saving the editor's data back to xlsx.
+_XSS_TO_EXCEL_FORMAT = {
+    "number":   "#,##0.00",
+    "percent":  "0.00%",
+    "usd":      '"$"#,##0.00',
+    "eur":      '"€"#,##0.00',
+    "rmb":      '"¥"#,##0.00',
+    "date":     "yyyy-mm-dd",
+    "time":     "hh:mm:ss",
+    "datetime": "yyyy-mm-dd hh:mm:ss",
+}
+
+
+def _argb_to_hex(rgb: Any) -> Optional[str]:
+    """openpyxl stores colors as 'AARRGGBB'. Return '#RRGGBB' or None."""
+    if not isinstance(rgb, str):
+        return None
+    s = rgb.strip()
+    if len(s) == 8:
+        return "#" + s[2:].lower()
+    if len(s) == 6:
+        return "#" + s.lower()
+    return None
+
+
+# Default Office theme palette (indices match openpyxl's Color(theme=N)).
+# Modern xlsx files store fills/fonts as theme refs rather than raw RGB; if
+# we can't extract a real RGB from the cell, fall back to this table so the
+# editor at least shows roughly the right colour. (Tint is intentionally
+# ignored — preserving exact shades would require parsing the theme XML.)
+_OFFICE_THEME_RGB = {
+    0: "#ffffff", 1: "#000000",
+    2: "#e7e6e6", 3: "#44546a",
+    4: "#5b9bd5", 5: "#ed7d31",
+    6: "#a5a5a5", 7: "#ffc000",
+    8: "#4472c4", 9: "#70ad47",
+    10: "#0563c1", 11: "#954f72",
+}
+
+# Standard Excel indexed colour table (subset — entries 0-63 cover everything
+# real-world templates use; values come from the OOXML spec).
+_INDEXED_COLOR_RGB = {
+    0:  "#000000", 1:  "#ffffff", 2:  "#ff0000", 3:  "#00ff00",
+    4:  "#0000ff", 5:  "#ffff00", 6:  "#ff00ff", 7:  "#00ffff",
+    8:  "#000000", 9:  "#ffffff", 10: "#ff0000", 11: "#00ff00",
+    12: "#0000ff", 13: "#ffff00", 14: "#ff00ff", 15: "#00ffff",
+    16: "#800000", 17: "#008000", 18: "#000080", 19: "#808000",
+    20: "#800080", 21: "#008080", 22: "#c0c0c0", 23: "#808080",
+    24: "#9999ff", 25: "#993366", 26: "#ffffcc", 27: "#ccffff",
+    28: "#660066", 29: "#ff8080", 30: "#0066cc", 31: "#ccccff",
+    32: "#000080", 33: "#ff00ff", 34: "#ffff00", 35: "#00ffff",
+    36: "#800080", 37: "#800000", 38: "#008080", 39: "#0000ff",
+    40: "#00ccff", 41: "#ccffff", 42: "#ccffcc", 43: "#ffff99",
+    44: "#99ccff", 45: "#ff99cc", 46: "#cc99ff", 47: "#ffcc99",
+    48: "#3366ff", 49: "#33cccc", 50: "#99cc00", 51: "#ffcc00",
+    52: "#ff9900", 53: "#ff6600", 54: "#666699", 55: "#969696",
+    56: "#003366", 57: "#339966", 58: "#003300", 59: "#333300",
+    60: "#993300", 61: "#993366", 62: "#333399", 63: "#333333",
+    64: "#000000", 65: "#ffffff",
+}
+
+
+# The clrScheme children appear in the theme XML as dk1, lt1, dk2, lt2,
+# accent1-6, hlink, folHlink. openpyxl's Color(theme=N) index, however,
+# swaps the first two pairs: 0=lt1, 1=dk1, 2=lt2, 3=dk2, then 4..9 accents,
+# 10 hlink, 11 folHlink. This maps XML position -> theme index.
+_THEME_XML_ORDER_TO_INDEX = {0: 1, 1: 0, 2: 3, 3: 2,
+                             4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
+                             10: 10, 11: 11}
+
+_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+def _load_theme_palette(wb: Any) -> dict:
+    """Parse the workbook's theme1.xml into {theme_index: '#rrggbb'}.
+
+    Falls back to the default Office palette for any slot we can't read.
+    Custom corporate templates frequently ship their own theme, so reading
+    the real one (rather than assuming Office defaults) is what makes their
+    fills/borders show the right colour.
+    """
+    palette = dict(_OFFICE_THEME_RGB)
+    raw = getattr(wb, "loaded_theme", None)
+    if not raw:
+        return palette
+    try:
+        if isinstance(raw, bytes):
+            root = ET.fromstring(raw)
+        else:
+            root = ET.fromstring(raw.encode("utf-8"))
+    except ET.ParseError:
+        return palette
+
+    scheme = root.find(f".//{_A_NS}clrScheme")
+    if scheme is None:
+        return palette
+
+    for pos, child in enumerate(list(scheme)):
+        idx = _THEME_XML_ORDER_TO_INDEX.get(pos)
+        if idx is None:
+            continue
+        srgb = child.find(f"{_A_NS}srgbClr")
+        sysclr = child.find(f"{_A_NS}sysClr")
+        hexval = None
+        if srgb is not None and srgb.get("val"):
+            hexval = srgb.get("val")
+        elif sysclr is not None:
+            hexval = sysclr.get("lastClr") or sysclr.get("val")
+        if hexval and re.fullmatch(r"[0-9A-Fa-f]{6}", hexval):
+            palette[idx] = "#" + hexval.lower()
+    return palette
+
+
+def _apply_tint(hex_color: str, tint: float) -> str:
+    """Apply the OOXML tint factor to a '#rrggbb' colour.
+
+    Excel stores subtle shades ("white, darker 15%") as a base theme colour
+    plus a tint in [-1, 1]. Ignoring the tint is why a light-grey fill was
+    coming through as pure white (invisible). Algorithm per ECMA-376: adjust
+    the HSL luminance.
+    """
+    if not tint:
+        return hex_color
+    s = hex_color.lstrip("#")
+    if len(s) != 6:
+        return hex_color
+    r, g, b = (int(s[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    h, l, sat = colorsys.rgb_to_hls(r, g, b)
+    if tint < 0:
+        l = l * (1.0 + tint)
+    else:
+        l = l * (1.0 - tint) + tint
+    l = min(1.0, max(0.0, l))
+    r, g, b = colorsys.hls_to_rgb(h, l, sat)
+    return "#%02x%02x%02x" % (
+        round(r * 255), round(g * 255), round(b * 255),
+    )
+
+
+def _color_to_hex(color: Any, palette: dict) -> Optional[str]:
+    """Resolve an openpyxl Color to a '#rrggbb' string, regardless of its type.
+
+    Handles type='rgb', 'theme' (resolved against the workbook's actual
+    palette, with tint applied), and 'indexed' (legacy palette). Returns
+    None if we can't recover any usable colour.
+    """
+    if color is None:
+        return None
+    ctype = getattr(color, "type", None)
+    tint = getattr(color, "tint", 0.0) or 0.0
+
+    if ctype == "rgb":
+        base = _argb_to_hex(getattr(color, "rgb", None))
+        return _apply_tint(base, tint) if base else None
+    if ctype == "theme":
+        theme_idx = getattr(color, "theme", None)
+        if isinstance(theme_idx, int):
+            base = palette.get(theme_idx) or _OFFICE_THEME_RGB.get(theme_idx)
+            return _apply_tint(base, tint) if base else None
+        return None
+    if ctype == "indexed":
+        idx = getattr(color, "indexed", None)
+        if isinstance(idx, int):
+            base = _INDEXED_COLOR_RGB.get(idx)
+            return _apply_tint(base, tint) if base else None
+        return None
+    # auto / unset / unknown
+    base = _argb_to_hex(getattr(color, "rgb", None))
+    return _apply_tint(base, tint) if base else None
+
+
+def xspreadsheet_to_xlsx_bytes(data: dict) -> bytes:
+    """Convert x-spreadsheet JSON back into an .xlsx workbook (bytes).
+
+    Accepts either a single sheet dict (legacy) or a list of sheets — uses
+    only the first sheet in either case, since we only support one-sheet
+    templates today.
+    """
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (str(data.get("name") or "Sheet1"))[:31]
+
+    styles = data.get("styles") or []
+    rows = data.get("rows") or {}
+    cols = data.get("cols") or {}
+    merges = data.get("merges") or []
+
+    for rk, rv in rows.items():
+        if rk == "len" or not isinstance(rv, dict):
+            continue
+        try:
+            r = int(rk) + 1
+        except (TypeError, ValueError):
+            continue
+        cells = rv.get("cells") or {}
+        for ck, cv in cells.items():
+            if not isinstance(cv, dict):
+                continue
+            try:
+                c = int(ck) + 1
+            except (TypeError, ValueError):
+                continue
+            text = cv.get("text", "")
+            style_idx = cv.get("style")
+            has_style = isinstance(style_idx, int) and 0 <= style_idx < len(styles)
+            # Keep blank-but-styled cells: a cell with no text but a fill or
+            # border still needs to be written, otherwise coloured input
+            # boxes and bordered spacers vanish on save.
+            if (text == "" or text is None) and not has_style:
+                continue
+            cell = ws.cell(row=r, column=c)
+            if text != "" and text is not None:
+                cell.value = _text_to_xlsx_value(text)
+            if has_style:
+                _apply_style_to_cell(cell, styles[style_idx])
+        height = rv.get("height")
+        if height:
+            try:
+                ws.row_dimensions[r].height = float(height)
+            except (TypeError, ValueError):
+                pass
+
+    for ck, cv in cols.items():
+        if ck == "len" or not isinstance(cv, dict):
+            continue
+        try:
+            c = int(ck) + 1
+        except (TypeError, ValueError):
+            continue
+        width_px = cv.get("width")
+        if not width_px:
+            continue
+        excel_width = max(2.0, (float(width_px) - 5) / _XSS_PX_PER_WIDTH_UNIT)
+        ws.column_dimensions[get_column_letter(c)].width = excel_width
+
+    for mr in merges:
+        if not isinstance(mr, str):
+            continue
+        try:
+            ws.merge_cells(mr)
+        except (ValueError, TypeError):
+            pass  # malformed range — skip rather than fail the save
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def _text_to_xlsx_value(text: str) -> Any:
+    """Coerce x-spreadsheet cell text into the appropriate openpyxl value.
+
+    - Strings starting with '=' are preserved verbatim so openpyxl writes them
+      as formulas.
+    - Strings that look like plain integers/floats are coerced so the sheet
+      can do arithmetic on them (otherwise SUM() over them won't add up).
+    - Everything else stays as a string. Templates use {{placeholders}} which
+      must remain string literals.
+    """
+    if not isinstance(text, str):
+        return text
+    if text.startswith("="):
+        return text
+    stripped = text.strip()
+    if _looks_numeric(stripped):
+        try:
+            return float(stripped) if "." in stripped else int(stripped)
+        except ValueError:
+            return text
+    return text
+
+
+def _apply_style_to_cell(cell: Cell, style: dict) -> None:
+    if not isinstance(style, dict):
+        return
+    font_src = style.get("font") or {}
+    color = style.get("color")
+    if font_src or color:
+        cell.font = Font(
+            name=font_src.get("name") or cell.font.name,
+            size=font_src.get("size") or cell.font.size,
+            bold=bool(font_src.get("bold")),
+            italic=bool(font_src.get("italic")),
+            color=_hex_to_argb(color) if color else cell.font.color,
+        )
+
+    halign = style.get("align")
+    valign = style.get("valign")
+    if valign == "middle":
+        valign = "center"  # openpyxl spelling
+    wrap = style.get("textwrap")
+    if halign or valign or wrap:
+        cell.alignment = Alignment(
+            horizontal=halign if halign in {"left", "center", "right"} else None,
+            vertical=valign if valign in {"top", "center", "bottom"} else None,
+            wrap_text=bool(wrap),
+        )
+
+    bgcolor = style.get("bgcolor")
+    if bgcolor:
+        argb = _hex_to_argb(bgcolor)
+        if argb:
+            cell.fill = PatternFill("solid", fgColor=argb)
+
+    # Number format. We stash the original Excel format string in
+    # `xlsxFormat` on load so an *unchanged* format round-trips exactly.
+    # But x-spreadsheet deep-clones the whole style (xlsxFormat included)
+    # when the user changes the format dropdown, only overwriting
+    # `style.format`. So if `format` no longer agrees with `xlsxFormat`,
+    # the user changed it and we must honour `format`, not the stale stash.
+    xlsx_fmt = style.get("xlsxFormat")
+    xss_fmt = style.get("format")
+    xss_fmt_l = xss_fmt.lower() if isinstance(xss_fmt, str) else None
+    has_xlsx_fmt = isinstance(xlsx_fmt, str) and bool(xlsx_fmt)
+
+    if xss_fmt_l in ("normal", "text", "general"):
+        # User explicitly cleared the format back to plain.
+        cell.number_format = "General"
+    elif has_xlsx_fmt and (
+        xss_fmt_l is None or _excel_to_xss_format(xlsx_fmt) == xss_fmt_l
+    ):
+        # Unchanged from the source workbook — restore the exact Excel format.
+        cell.number_format = xlsx_fmt
+    elif xss_fmt_l:
+        # User picked a different named format in the editor.
+        mapped = _XSS_TO_EXCEL_FORMAT.get(xss_fmt_l)
+        cell.number_format = mapped or "General"
+
+    border = style.get("border")
+    if isinstance(border, dict):
+        cell.border = _xss_border_to_openpyxl(border)
+
+
+def _xss_side(spec: Any) -> Optional[Side]:
+    """Decode ['thin', '#000000'] (x-spreadsheet shape) into an openpyxl Side."""
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return None
+    style = spec[0] if len(spec) > 0 else "thin"
+    color_hex = spec[1] if len(spec) > 1 else "#000000"
+    if style not in _XSS_BORDER_STYLES:
+        style = "thin"
+    argb = _hex_to_argb(color_hex) or "FF000000"
+    return Side(style=style, color=argb)
+
+
+def _xss_border_to_openpyxl(border: dict) -> Border:
+    return Border(
+        top=_xss_side(border.get("top")),
+        bottom=_xss_side(border.get("bottom")),
+        left=_xss_side(border.get("left")),
+        right=_xss_side(border.get("right")),
+    )
+
+
+def _hex_to_argb(hex_str: Optional[str]) -> Optional[str]:
+    if not isinstance(hex_str, str):
+        return None
+    s = hex_str.strip().lstrip("#")
+    if len(s) == 6:
+        return "FF" + s.upper()
+    if len(s) == 8:
+        return s.upper()
+    return None
+
+
+def sample_po_for_preview() -> SimpleNamespace:
+    """Return an in-memory PurchaseOrder-shaped object for template preview.
+
+    Duck-typed (SimpleNamespace, not a real ORM row) so it never touches the
+    database. render_po_xlsx only reads attributes; it doesn't care that this
+    isn't a real model instance.
+    """
+    items = [
+        SimpleNamespace(
+            name="Widget Alpha", description="Standard widget",
+            model="WA-100", vendor="Acme Corp",
+            vendor_sku="SKU-100", url="https://example.com/wa",
+        ),
+        SimpleNamespace(
+            name="Gadget Beta", description="Premium gadget",
+            model="GB-200", vendor="Acme Corp",
+            vendor_sku="SKU-200", url="https://example.com/gb",
+        ),
+        SimpleNamespace(
+            name="Sprocket Gamma", description="Heavy-duty sprocket",
+            model="SG-300", vendor="Acme Corp",
+            vendor_sku="SKU-300", url="https://example.com/sg",
+        ),
+    ]
+    lines: list[SimpleNamespace] = []
+    for i, (item, qty, cost) in enumerate(
+        zip(items, [10, 2, 4], [12.50, 199.99, 45.00]), start=1
+    ):
+        line = SimpleNamespace(
+            id=i, qty=qty, unit_cost=cost, line_no=i, notes="", item=item,
+        )
+        line.line_total = qty * cost
+        lines.append(line)
+    po = SimpleNamespace(
+        po_number="PREVIEW-001",
+        vendor="Acme Corp",
+        ship_to="123 Main St, Anytown USA",
+        notes="This is a preview rendered with sample data.",
+        ordered_at=None,
+        created_at=dt.datetime.now(),
+        lines=lines,
+    )
+    po.total = sum(l.line_total for l in lines)
+    return po

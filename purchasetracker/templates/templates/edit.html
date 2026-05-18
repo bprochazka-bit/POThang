@@ -1,0 +1,420 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if mode == 'edit' %}Edit {{ original_name }}{% else %}New template{% endif %}
+  &middot; PurchaseTracker
+{% endblock %}
+{% block content %}
+
+{# x-spreadsheet CSS + JS, vendored locally so the editor works offline.
+   Source: https://github.com/myliang/x-spreadsheet (MIT). Update by replacing
+   the two files in static/vendor/xspreadsheet/. #}
+<link rel="stylesheet"
+      href="{{ url_for('static', filename='vendor/xspreadsheet/xspreadsheet.css') }}">
+<script src="{{ url_for('static', filename='vendor/xspreadsheet/xspreadsheet.js') }}"></script>
+
+<style>
+  /* Force x-spreadsheet's white surfaces onto a contrasting frame so the
+     dark site chrome doesn't bleed into the editor. */
+  .tpl-editor-wrap { background: #ffffff; color: #222; border-radius: 6px;
+                     padding: 6px; box-shadow: var(--shadow); }
+  .tpl-editor-wrap, .tpl-editor-wrap * { color: #222; }
+  .tpl-toolbar { display: flex; gap: 0.5rem; align-items: center;
+                 flex-wrap: wrap; margin-bottom: 0.7rem; }
+  .tpl-toolbar input[type=text] { min-width: 16rem; }
+  .tpl-tabs { display: flex; gap: 0; margin-bottom: 0.5rem;
+              border-bottom: 1px solid var(--border); }
+  .tpl-tab { padding: 0.4rem 1rem; cursor: pointer; user-select: none;
+             border: 1px solid transparent; border-bottom: none;
+             margin-bottom: -1px; color: var(--fg-muted); }
+  .tpl-tab.active { background: var(--surface-1); color: var(--fg);
+                    border-color: var(--border); border-bottom-color: var(--surface-1); }
+  .tpl-pane { display: none; }
+  .tpl-pane.active { display: block; }
+  .tpl-status { margin-left: auto; color: var(--fg-muted); font-size: 0.85rem; }
+  .tpl-status.error { color: var(--danger); }
+  .tpl-status.ok { color: var(--success); }
+  #preview-sheet { pointer-events: auto; /* allow scrolling, no editing */ }
+
+  .tpl-cellbar { display: flex; align-items: center; gap: 0.4rem;
+                 margin-bottom: 0.4rem; }
+  .tpl-cellbar .cellref { min-width: 3.5rem; text-align: center;
+                          font-family: ui-monospace, monospace;
+                          color: var(--fg-muted); font-size: 0.85rem;
+                          border: 1px solid var(--border); border-radius: 4px;
+                          padding: 0.25rem 0.3rem; }
+  .tpl-cellbar .fx { color: var(--fg-subtle); font-style: italic;
+                     font-family: ui-serif, Georgia, serif; padding: 0 0.2rem; }
+  .tpl-cellbar input.formula { flex: 1; font-family: ui-monospace, monospace;
+                               font-size: 0.9rem; }
+  .tpl-zoom { display: flex; align-items: center; gap: 0.2rem; }
+  .tpl-zoom button { width: 1.9rem; }
+  .tpl-zoom .zlabel { min-width: 3rem; text-align: center;
+                      color: var(--fg-muted); font-size: 0.85rem; }
+  /* Zoom via transform:scale with origin 0,0. event.offsetX/Y (which
+     x-spreadsheet uses for hit-testing) are reported in the element's own
+     pre-transform coordinate space, so clicks stay accurate at any zoom —
+     unlike CSS `zoom`, which shifted the cursor mapping. */
+  .tpl-zoomwrap { overflow: auto; max-height: calc(100vh - 220px); }
+
+  /* x-spreadsheet's native scrollbars are too thin to grab. Fatten them
+     and give the thumb contrast. */
+  .tpl-editor-wrap .x-spreadsheet-scrollbar.horizontal { height: 16px; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar.vertical { width: 16px; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar::-webkit-scrollbar {
+    width: 16px; height: 16px; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar::-webkit-scrollbar-thumb {
+    background: #9aa6b2; border-radius: 8px; border: 3px solid #f4f5f8; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #6c7681; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar {
+    scrollbar-width: auto; scrollbar-color: #9aa6b2 #f4f5f8; }
+
+  /* The inline cell editor inherits `color` and has a transparent
+     background, so on a dark-filled cell the text was invisible. Force a
+     readable white box while editing. */
+  .tpl-editor-wrap .x-spreadsheet-editor .x-spreadsheet-editor-area {
+    background: #ffffff !important; }
+  .tpl-editor-wrap .x-spreadsheet-editor .x-spreadsheet-editor-area textarea,
+  .tpl-editor-wrap .x-spreadsheet-editor .x-spreadsheet-editor-area .textline {
+    background: #ffffff !important; color: #222 !important; }
+</style>
+
+<h1>
+  {% if mode == 'edit' %}Edit template{% else %}New template{% endif %}
+</h1>
+
+<p class="meta">
+  <a href="{{ url_for('templates.list_templates') }}">&larr; All templates</a>
+  &middot; The Edit tab is a live spreadsheet (formulas, merged cells, basic
+  styling); the Preview tab renders this template against a sample PO. Use
+  the <strong>fx</strong> bar to edit a selected cell&rsquo;s contents or
+  formula, and the zoom controls to fit more on screen.
+</p>
+
+<div class="tpl-toolbar">
+  <label>Filename:
+    <input type="text" id="tpl-name" value="{{ initial_name }}"
+           placeholder="e.g. po_template.xlsx">
+  </label>
+  <button type="button" id="btn-save" class="btn">Save</button>
+  <button type="button" id="btn-preview">Refresh preview</button>
+  <span class="tpl-status" id="tpl-status"></span>
+</div>
+
+<div class="tpl-tabs" role="tablist">
+  <div class="tpl-tab active" data-pane="edit-pane" role="tab">Edit</div>
+  <div class="tpl-tab" data-pane="preview-pane" role="tab">Preview</div>
+</div>
+
+<div id="edit-pane" class="tpl-pane active">
+  <div class="tpl-cellbar">
+    <span class="cellref" id="edit-cellref">A1</span>
+    <span class="fx">fx</span>
+    <input type="text" class="formula" id="edit-formula"
+           placeholder="Select a cell to edit its contents or formula (e.g. =SUM(F9:F11))"
+           autocomplete="off" spellcheck="false">
+    <span class="tpl-zoom">
+      <button type="button" data-zoom="edit" data-dir="-1" title="Zoom out">&minus;</button>
+      <span class="zlabel" id="edit-zlabel">100%</span>
+      <button type="button" data-zoom="edit" data-dir="1" title="Zoom in">+</button>
+      <button type="button" data-zoom="edit" data-dir="0" title="Reset zoom">⤢</button>
+    </span>
+  </div>
+  <div class="tpl-zoomwrap"><div class="tpl-editor-wrap"><div id="edit-sheet"></div></div></div>
+</div>
+<div id="preview-pane" class="tpl-pane">
+  <div class="tpl-cellbar">
+    <span class="cellref" id="preview-cellref">A1</span>
+    <span class="fx">fx</span>
+    <input type="text" class="formula" id="preview-formula"
+           placeholder="Select a cell to inspect its contents (read-only)"
+           autocomplete="off" spellcheck="false" readonly>
+    <span class="tpl-zoom">
+      <button type="button" data-zoom="preview" data-dir="-1" title="Zoom out">&minus;</button>
+      <span class="zlabel" id="preview-zlabel">100%</span>
+      <button type="button" data-zoom="preview" data-dir="1" title="Zoom in">+</button>
+      <button type="button" data-zoom="preview" data-dir="0" title="Reset zoom">⤢</button>
+    </span>
+  </div>
+  <div class="tpl-zoomwrap"><div class="tpl-editor-wrap"><div id="preview-sheet"></div></div></div>
+  <p><small>Preview is rendered with a synthetic PO
+  (<code>PREVIEW-001</code>, vendor &ldquo;Acme Corp&rdquo;, three sample
+  items) so you can check layout, merged cells, colours and that
+  <code>&#123;&#123;placeholders&#125;&#125;</code> &mdash; including
+  formula references like <code>=SUM(I23:I&#123;&#123;items.last_row&#125;&#125;)</code>
+  &mdash; expand correctly. Formulas are shown as written, not computed;
+  open the downloaded xlsx in Excel or LibreOffice for calculated
+  values.</small></p>
+</div>
+
+<script>
+(function () {
+  var mode = {{ mode | tojson }};
+  var originalName = {{ original_name | tojson }};
+  var urlSave = {{ url_for('templates.save') | tojson }};
+  var urlPreview = {{ url_for('templates.preview') | tojson }};
+  var urlData = originalName
+    ? {{ url_for('templates.list_templates') | tojson }} + encodeURIComponent(originalName) + '/data'
+    : null;
+  var urlList = {{ url_for('templates.list_templates') | tojson }};
+
+  var statusEl = document.getElementById('tpl-status');
+  var nameEl = document.getElementById('tpl-name');
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg || '';
+    statusEl.className = 'tpl-status' + (kind ? ' ' + kind : '');
+  }
+
+  // Tabs ------------------------------------------------------------------
+  document.querySelectorAll('.tpl-tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      document.querySelectorAll('.tpl-tab').forEach(function (t) {
+        t.classList.toggle('active', t === tab);
+      });
+      var paneId = tab.dataset.pane;
+      document.querySelectorAll('.tpl-pane').forEach(function (p) {
+        p.classList.toggle('active', p.id === paneId);
+      });
+      if (paneId === 'preview-pane') {
+        refreshPreview();
+      }
+    });
+  });
+
+  // Editor instance -------------------------------------------------------
+  var Spreadsheet = window.x_spreadsheet;
+  if (!Spreadsheet) {
+    setStatus('Spreadsheet library failed to load. Check that static/vendor/xspreadsheet/ is present.', 'error');
+    return;
+  }
+
+  var editEl = document.getElementById('edit-sheet');
+  var editor = new Spreadsheet(editEl, {
+    showToolbar: true,
+    showGrid: true,
+    showContextmenu: true,
+    // Show formulas literally instead of evaluating them. x-spreadsheet's
+    // mini engine only knows 8 functions and has no error handling, so
+    // template formulas (with {{tokens}} or INDIRECT/ADDRESS/ROW/COLUMN)
+    // would throw mid-render and corrupt the grid. Authoring a template
+    // means editing the formula text anyway, not its (dataless) result.
+    evalPaused: true,
+    view: {
+      height: function () { return Math.max(520, window.innerHeight - 320); },
+      width: function () { return editEl.clientWidth - 12; },
+    },
+  });
+
+  // Read-only previewer
+  var previewEl = document.getElementById('preview-sheet');
+  var previewer = new Spreadsheet(previewEl, {
+    mode: 'read',
+    showToolbar: false,
+    showGrid: true,
+    showContextmenu: false,
+    // Same reason: after server-side render a template may still contain
+    // INDIRECT/ADDRESS/etc. that x-spreadsheet can't evaluate without
+    // crashing. Show the rendered formulas as written; for computed
+    // values open the downloaded xlsx in Excel/LibreOffice.
+    evalPaused: true,
+    view: {
+      height: function () { return Math.max(520, window.innerHeight - 360); },
+      width: function () { return previewEl.clientWidth - 12; },
+    },
+  });
+
+  // --- Formula bar -------------------------------------------------------
+  // x-spreadsheet 1.1.x has no built-in formula bar; wire a custom one via
+  // its cell-selected / cell-edited events and cellText() API.
+  function colName(ci) {
+    var s = '';
+    ci += 1;
+    while (ci > 0) { var m = (ci - 1) % 26; s = String.fromCharCode(65 + m) + s; ci = (ci - m - 1) / 26; }
+    return s;
+  }
+  function cellTextOf(inst, ri, ci) {
+    try {
+      var c = inst.cell ? inst.cell(ri, ci) : null;
+      return (c && typeof c.text === 'string') ? c.text : '';
+    } catch (e) { return ''; }
+  }
+  function wireFormulaBar(inst, refId, fId, editable) {
+    var refEl = document.getElementById(refId);
+    var fEl = document.getElementById(fId);
+    var sel = { ri: 0, ci: 0 };
+    function show(ri, ci) {
+      sel.ri = ri; sel.ci = ci;
+      refEl.textContent = colName(ci) + (ri + 1);
+      fEl.value = cellTextOf(inst, ri, ci);
+    }
+    inst.on('cell-selected', function (cell, ri, ci) { show(ri, ci); });
+    inst.on('cells-selected', function (cell, range) {
+      show(range.sri, range.sci);
+    });
+    inst.on('cell-edited', function (text, ri, ci) {
+      if (ri === sel.ri && ci === sel.ci) fEl.value = text;
+    });
+    if (editable) {
+      var commit = function (keepFocus) {
+        try {
+          inst.cellText(sel.ri, sel.ci, fEl.value);
+          inst.reRender();
+        } catch (e) { /* ignore bad ranges */ }
+      };
+      fEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { fEl.value = cellTextOf(inst, sel.ri, sel.ci); fEl.blur(); }
+      });
+      fEl.addEventListener('blur', function () { commit(); });
+    }
+    show(0, 0);
+  }
+  wireFormulaBar(editor, 'edit-cellref', 'edit-formula', true);
+  wireFormulaBar(previewer, 'preview-cellref', 'preview-formula', false);
+
+  // --- Zoom --------------------------------------------------------------
+  var ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+  var zoomState = { edit: 4, preview: 4 };  // index into ZOOM_STEPS (1.0)
+  function applyZoom(which) {
+    var z = ZOOM_STEPS[zoomState[which]];
+    var wrap = document.querySelector(
+      '#' + which + '-pane .tpl-editor-wrap');
+    if (wrap) {
+      wrap.style.transformOrigin = '0 0';
+      wrap.style.transform = z === 1 ? '' : 'scale(' + z + ')';
+      // Reserve layout space for the scaled box so the .tpl-zoomwrap
+      // shows correct scrollbars (transforms don't grow the layout box).
+      if (z > 1) {
+        wrap.style.marginRight = (wrap.offsetWidth * (z - 1)) + 'px';
+        wrap.style.marginBottom = (wrap.offsetHeight * (z - 1)) + 'px';
+      } else {
+        wrap.style.marginRight = '';
+        wrap.style.marginBottom = '';
+      }
+    }
+    var lbl = document.getElementById(which + '-zlabel');
+    if (lbl) lbl.textContent = Math.round(z * 100) + '%';
+  }
+  document.querySelectorAll('[data-zoom]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var which = btn.dataset.zoom;
+      var dir = parseInt(btn.dataset.dir, 10);
+      if (dir === 0) { zoomState[which] = 4; }
+      else {
+        zoomState[which] = Math.min(ZOOM_STEPS.length - 1,
+          Math.max(0, zoomState[which] + dir));
+      }
+      applyZoom(which);
+    });
+  });
+
+  function currentEditorData() {
+    var data = editor.getData();
+    // x-spreadsheet returns an array of sheets — we only use the first.
+    if (Array.isArray(data)) data = data[0] || {};
+    return data;
+  }
+
+  // Load initial data -----------------------------------------------------
+  if (urlData) {
+    setStatus('Loading…');
+    fetch(urlData, { credentials: 'same-origin' })
+      .then(function (r) { return r.json().then(function (j) { return [r, j]; }); })
+      .then(function (pair) {
+        var r = pair[0], data = pair[1];
+        if (!r.ok) { throw new Error(data.error || 'load failed'); }
+        editor.loadData(data);
+        setStatus('');
+      })
+      .catch(function (e) {
+        setStatus('Could not load template: ' + e.message, 'error');
+      });
+  } else {
+    // Brand-new template: leave the empty grid alone.
+    setStatus('');
+  }
+
+  // Save ------------------------------------------------------------------
+  function save(overwrite) {
+    var name = (nameEl.value || '').trim();
+    if (!name) {
+      setStatus('Filename is required.', 'error');
+      nameEl.focus();
+      return;
+    }
+    setStatus('Saving…');
+    fetch(urlSave, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name,
+        original: originalName || '',
+        overwrite: !!overwrite,
+        data: currentEditorData(),
+      }),
+    })
+      .then(function (r) {
+        return r.json().then(function (j) { return [r, j]; });
+      })
+      .then(function (pair) {
+        var r = pair[0], j = pair[1];
+        if (r.status === 409 && j.conflict) {
+          if (confirm(j.error + '\n\nOverwrite the existing template?')) {
+            return save(true);
+          }
+          setStatus('Save cancelled.', '');
+          return;
+        }
+        if (!r.ok) { throw new Error(j.error || 'save failed'); }
+        setStatus('Saved as ' + j.name + '.', 'ok');
+        // If we renamed (or this was a new template), navigate to the
+        // canonical edit URL so subsequent saves keep the rename in sync.
+        if (j.redirect && j.name !== originalName) {
+          window.location.href = j.redirect;
+        } else {
+          originalName = j.name;
+        }
+      })
+      .catch(function (e) {
+        setStatus('Save failed: ' + e.message, 'error');
+      });
+  }
+  document.getElementById('btn-save').addEventListener('click', function () {
+    save(false);
+  });
+
+  // Preview ---------------------------------------------------------------
+  function refreshPreview() {
+    setStatus('Rendering preview…');
+    fetch(urlPreview, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: currentEditorData() }),
+    })
+      .then(function (r) {
+        return r.json().then(function (j) { return [r, j]; });
+      })
+      .then(function (pair) {
+        var r = pair[0], j = pair[1];
+        if (!r.ok) { throw new Error(j.error || 'preview failed'); }
+        previewer.loadData(j);
+        setStatus('Preview updated.', 'ok');
+      })
+      .catch(function (e) {
+        setStatus('Preview failed: ' + e.message, 'error');
+      });
+  }
+  document.getElementById('btn-preview').addEventListener('click', refreshPreview);
+
+  // Re-flow on resize so the editors fit the viewport.
+  window.addEventListener('resize', function () {
+    editor.reRender && editor.reRender();
+    previewer.reRender && previewer.reRender();
+  });
+})();
+</script>
+
+{% endblock %}

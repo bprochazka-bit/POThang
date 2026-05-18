@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}PO Templates &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<h1>PO Templates</h1>
+
+<p class="meta">
+  Reusable <code>.xlsx</code> templates rendered into a PO from the
+  &ldquo;Render from template&rdquo; section on each PO&rsquo;s detail page.
+  &middot;
+  <a href="{{ url_for('templates.new') }}">New template</a>
+</p>
+
+<section class="card">
+  {% if templates %}
+  <table class="data">
+    <thead><tr>
+      <th>Name</th>
+      <th>Size</th>
+      <th>Actions</th>
+    </tr></thead>
+    <tbody>
+    {% for t in templates %}
+    <tr>
+      <td><a href="{{ url_for('templates.edit', name=t.name) }}">{{ t.name }}</a></td>
+      <td>{{ '{:,}'.format(t.size) }} bytes</td>
+      <td>
+        <a href="{{ url_for('templates.edit', name=t.name) }}">edit</a>
+        &middot;
+        <form method="post" action="{{ url_for('templates.delete', name=t.name) }}"
+              class="inline"
+              onsubmit="return confirm('Delete template {{ t.name }}?');">
+          <button type="submit" class="link">delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p><em>No templates yet. <a href="{{ url_for('templates.new') }}">Create one</a>.</em></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Placeholders</h2>
+  <p>Templates can use these placeholders inside cells — they are substituted
+  when a PO is rendered:</p>
+  <ul>
+    <li>Header fields: <code>{{ '{{po_number}}' }}</code>, <code>{{ '{{vendor}}' }}</code>,
+      <code>{{ '{{ship_to}}' }}</code>, <code>{{ '{{date}}' }}</code>,
+      <code>{{ '{{total}}' }}</code>, <code>{{ '{{notes}}' }}</code>,
+      <code>{{ '{{revision}}' }}</code></li>
+    <li>Items loop: bracket rows with <code>{{ '{{#items}}' }}</code> and
+      <code>{{ '{{/items}}' }}</code> markers; the rows between them are
+      repeated per PO line. Inside, use
+      <code>{{ '{{item.index}}' }}</code>, <code>{{ '{{item.name}}' }}</code>,
+      <code>{{ '{{item.qty}}' }}</code>, <code>{{ '{{item.unit_cost}}' }}</code>,
+      <code>{{ '{{item.line_total}}' }}</code>, <code>{{ '{{item.model}}' }}</code>,
+      <code>{{ '{{item.vendor}}' }}</code>, <code>{{ '{{item.vendor_sku}}' }}</code>,
+      <code>{{ '{{item.url}}' }}</code>, <code>{{ '{{item.notes}}' }}</code></li>
+    <li>Conditional sections (single cell): <code>{{ '{{#if var}}' }}</code> &hellip;
+      <code>{{ '{{else}}' }}</code> &hellip; <code>{{ '{{/if}}' }}</code></li>
+  </ul>
+  <p><small>Excel formulas (<code>=SUM(F9:F11)</code>, etc.) and merged cells
+  are preserved through the editor and render pipeline. The editor preserves
+  basic styling (bold, alignment, background fill, number format); more
+  exotic xlsx features (charts, conditional formatting, complex borders) are
+  dropped on edit.</small></p>
+</section>
+
+{% endblock %}
