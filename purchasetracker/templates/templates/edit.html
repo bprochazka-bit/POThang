@@ -34,6 +34,25 @@
   .tpl-status.error { color: var(--danger); }
   .tpl-status.ok { color: var(--success); }
   #preview-sheet { pointer-events: auto; /* allow scrolling, no editing */ }
+
+  .tpl-cellbar { display: flex; align-items: center; gap: 0.4rem;
+                 margin-bottom: 0.4rem; }
+  .tpl-cellbar .cellref { min-width: 3.5rem; text-align: center;
+                          font-family: ui-monospace, monospace;
+                          color: var(--fg-muted); font-size: 0.85rem;
+                          border: 1px solid var(--border); border-radius: 4px;
+                          padding: 0.25rem 0.3rem; }
+  .tpl-cellbar .fx { color: var(--fg-subtle); font-style: italic;
+                     font-family: ui-serif, Georgia, serif; padding: 0 0.2rem; }
+  .tpl-cellbar input.formula { flex: 1; font-family: ui-monospace, monospace;
+                               font-size: 0.9rem; }
+  .tpl-zoom { display: flex; align-items: center; gap: 0.2rem; }
+  .tpl-zoom button { width: 1.9rem; }
+  .tpl-zoom .zlabel { min-width: 3rem; text-align: center;
+                      color: var(--fg-muted); font-size: 0.85rem; }
+  /* CSS `zoom` (not transform) keeps x-spreadsheet's offsetX/Y mouse
+     mapping correct, so clicking still selects the right cell. */
+  .tpl-zoomwrap { overflow: auto; }
 </style>
 
 <h1>
@@ -43,7 +62,9 @@
 <p class="meta">
   <a href="{{ url_for('templates.list_templates') }}">&larr; All templates</a>
   &middot; The Edit tab is a live spreadsheet (formulas, merged cells, basic
-  styling); the Preview tab renders this template against a sample PO.
+  styling); the Preview tab renders this template against a sample PO. Use
+  the <strong>fx</strong> bar to edit a selected cell&rsquo;s contents or
+  formula, and the zoom controls to fit more on screen.
 </p>
 
 <div class="tpl-toolbar">
@@ -62,10 +83,36 @@
 </div>
 
 <div id="edit-pane" class="tpl-pane active">
-  <div class="tpl-editor-wrap"><div id="edit-sheet"></div></div>
+  <div class="tpl-cellbar">
+    <span class="cellref" id="edit-cellref">A1</span>
+    <span class="fx">fx</span>
+    <input type="text" class="formula" id="edit-formula"
+           placeholder="Select a cell to edit its contents or formula (e.g. =SUM(F9:F11))"
+           autocomplete="off" spellcheck="false">
+    <span class="tpl-zoom">
+      <button type="button" data-zoom="edit" data-dir="-1" title="Zoom out">&minus;</button>
+      <span class="zlabel" id="edit-zlabel">100%</span>
+      <button type="button" data-zoom="edit" data-dir="1" title="Zoom in">+</button>
+      <button type="button" data-zoom="edit" data-dir="0" title="Reset zoom">⤢</button>
+    </span>
+  </div>
+  <div class="tpl-zoomwrap"><div class="tpl-editor-wrap"><div id="edit-sheet"></div></div></div>
 </div>
 <div id="preview-pane" class="tpl-pane">
-  <div class="tpl-editor-wrap"><div id="preview-sheet"></div></div>
+  <div class="tpl-cellbar">
+    <span class="cellref" id="preview-cellref">A1</span>
+    <span class="fx">fx</span>
+    <input type="text" class="formula" id="preview-formula"
+           placeholder="Select a cell to inspect its contents (read-only)"
+           autocomplete="off" spellcheck="false" readonly>
+    <span class="tpl-zoom">
+      <button type="button" data-zoom="preview" data-dir="-1" title="Zoom out">&minus;</button>
+      <span class="zlabel" id="preview-zlabel">100%</span>
+      <button type="button" data-zoom="preview" data-dir="1" title="Zoom in">+</button>
+      <button type="button" data-zoom="preview" data-dir="0" title="Reset zoom">⤢</button>
+    </span>
+  </div>
+  <div class="tpl-zoomwrap"><div class="tpl-editor-wrap"><div id="preview-sheet"></div></div></div>
   <p><small>Preview is rendered with a synthetic PO
   (<code>PREVIEW-001</code>, vendor &ldquo;Acme Corp&rdquo;, three sample
   items). Formula results are computed client-side by the editor&rsquo;s own
@@ -137,6 +184,79 @@
       height: function () { return Math.max(520, window.innerHeight - 360); },
       width: function () { return previewEl.clientWidth - 12; },
     },
+  });
+
+  // --- Formula bar -------------------------------------------------------
+  // x-spreadsheet 1.1.x has no built-in formula bar; wire a custom one via
+  // its cell-selected / cell-edited events and cellText() API.
+  function colName(ci) {
+    var s = '';
+    ci += 1;
+    while (ci > 0) { var m = (ci - 1) % 26; s = String.fromCharCode(65 + m) + s; ci = (ci - m - 1) / 26; }
+    return s;
+  }
+  function cellTextOf(inst, ri, ci) {
+    try {
+      var c = inst.cell ? inst.cell(ri, ci) : null;
+      return (c && typeof c.text === 'string') ? c.text : '';
+    } catch (e) { return ''; }
+  }
+  function wireFormulaBar(inst, refId, fId, editable) {
+    var refEl = document.getElementById(refId);
+    var fEl = document.getElementById(fId);
+    var sel = { ri: 0, ci: 0 };
+    function show(ri, ci) {
+      sel.ri = ri; sel.ci = ci;
+      refEl.textContent = colName(ci) + (ri + 1);
+      fEl.value = cellTextOf(inst, ri, ci);
+    }
+    inst.on('cell-selected', function (cell, ri, ci) { show(ri, ci); });
+    inst.on('cells-selected', function (cell, range) {
+      show(range.sri, range.sci);
+    });
+    inst.on('cell-edited', function (text, ri, ci) {
+      if (ri === sel.ri && ci === sel.ci) fEl.value = text;
+    });
+    if (editable) {
+      var commit = function (keepFocus) {
+        try {
+          inst.cellText(sel.ri, sel.ci, fEl.value);
+          inst.reRender();
+        } catch (e) { /* ignore bad ranges */ }
+      };
+      fEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { fEl.value = cellTextOf(inst, sel.ri, sel.ci); fEl.blur(); }
+      });
+      fEl.addEventListener('blur', function () { commit(); });
+    }
+    show(0, 0);
+  }
+  wireFormulaBar(editor, 'edit-cellref', 'edit-formula', true);
+  wireFormulaBar(previewer, 'preview-cellref', 'preview-formula', false);
+
+  // --- Zoom --------------------------------------------------------------
+  var ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+  var zoomState = { edit: 4, preview: 4 };  // index into ZOOM_STEPS (1.0)
+  function applyZoom(which) {
+    var z = ZOOM_STEPS[zoomState[which]];
+    var wrap = document.querySelector(
+      '#' + which + '-pane .tpl-editor-wrap');
+    if (wrap) wrap.style.zoom = z;
+    var lbl = document.getElementById(which + '-zlabel');
+    if (lbl) lbl.textContent = Math.round(z * 100) + '%';
+  }
+  document.querySelectorAll('[data-zoom]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var which = btn.dataset.zoom;
+      var dir = parseInt(btn.dataset.dir, 10);
+      if (dir === 0) { zoomState[which] = 4; }
+      else {
+        zoomState[which] = Math.min(ZOOM_STEPS.length - 1,
+          Math.max(0, zoomState[which] + dir));
+      }
+      applyZoom(which);
+    });
   });
 
   function currentEditorData() {

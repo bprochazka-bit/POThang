@@ -652,12 +652,17 @@ def _worksheet_to_xspreadsheet(ws: Worksheet, palette: dict) -> dict:
         for c in range(1, max_c + 1):
             cell = ws.cell(row=r, column=c)
             val = cell.value
-            if val is None or val == "":
-                # Capture style on otherwise-blank cells only if it's non-default
-                # (keeps the JSON small).
-                continue
-            cell_data: dict[str, Any] = {"text": _xlsx_value_to_text(val)}
+            has_text = val is not None and val != ""
             key, style_obj = _cell_style_signature(cell, palette)
+            # Emit a cell if it has text OR a non-default style. Blank-but-
+            # styled cells (coloured input boxes, bordered spacers, the BILL
+            # TO block, the purple barcode cells) MUST be kept — skipping
+            # them was why large swathes of the form rendered uncoloured.
+            if not has_text and style_obj is None:
+                continue
+            cell_data: dict[str, Any] = {
+                "text": _xlsx_value_to_text(val) if has_text else "",
+            }
             if style_obj is not None:
                 if key not in style_cache:
                     style_cache[key] = len(styles)
@@ -675,16 +680,25 @@ def _worksheet_to_xspreadsheet(ws: Worksheet, palette: dict) -> dict:
             rows[str(r - 1)] = row_obj
     rows["len"] = max(max_r + 10, 100)
 
+    # Emit a width for EVERY column up to max_c, not just ones with an
+    # explicit width. Excel's default is ~8.43 chars; if we leave default
+    # columns out, x-spreadsheet falls back to its own (different) default
+    # and the whole form's proportions drift — narrow columns wrapped text
+    # ("MODEL/S KU") while others stretched.
+    default_w = None
+    sf = getattr(ws, "sheet_format", None)
+    if sf is not None and getattr(sf, "defaultColWidth", None):
+        default_w = sf.defaultColWidth
+    if not default_w:
+        default_w = 8.43
+
     cols: dict[str, Any] = {}
-    for col_letter, dim in ws.column_dimensions.items():
-        if not dim.width:
-            continue
-        try:
-            idx = column_index_from_string(col_letter) - 1
-        except ValueError:
-            continue
-        cols[str(idx)] = {
-            "width": int(round(dim.width * _XSS_PX_PER_WIDTH_UNIT + 5))
+    for c in range(1, max_c + 1):
+        letter = get_column_letter(c)
+        dim = ws.column_dimensions.get(letter)
+        w = dim.width if dim is not None and dim.width else default_w
+        cols[str(c - 1)] = {
+            "width": int(round(w * _XSS_PX_PER_WIDTH_UNIT + 5))
         }
     cols["len"] = max(max_c + 5, 26)
 
@@ -1128,12 +1142,17 @@ def xspreadsheet_to_xlsx_bytes(data: dict) -> bytes:
             except (TypeError, ValueError):
                 continue
             text = cv.get("text", "")
-            if text == "" or text is None:
+            style_idx = cv.get("style")
+            has_style = isinstance(style_idx, int) and 0 <= style_idx < len(styles)
+            # Keep blank-but-styled cells: a cell with no text but a fill or
+            # border still needs to be written, otherwise coloured input
+            # boxes and bordered spacers vanish on save.
+            if (text == "" or text is None) and not has_style:
                 continue
             cell = ws.cell(row=r, column=c)
-            cell.value = _text_to_xlsx_value(text)
-            style_idx = cv.get("style")
-            if isinstance(style_idx, int) and 0 <= style_idx < len(styles):
+            if text != "" and text is not None:
+                cell.value = _text_to_xlsx_value(text)
+            if has_style:
                 _apply_style_to_cell(cell, styles[style_idx])
         height = rv.get("height")
         if height:
