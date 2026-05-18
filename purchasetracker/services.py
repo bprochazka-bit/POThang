@@ -1242,17 +1242,29 @@ def _apply_style_to_cell(cell: Cell, style: dict) -> None:
         if argb:
             cell.fill = PatternFill("solid", fgColor=argb)
 
-    # Prefer the original Excel format string if we stashed one; otherwise
-    # map x-spreadsheet's named format back to an Excel equivalent.
+    # Number format. We stash the original Excel format string in
+    # `xlsxFormat` on load so an *unchanged* format round-trips exactly.
+    # But x-spreadsheet deep-clones the whole style (xlsxFormat included)
+    # when the user changes the format dropdown, only overwriting
+    # `style.format`. So if `format` no longer agrees with `xlsxFormat`,
+    # the user changed it and we must honour `format`, not the stale stash.
     xlsx_fmt = style.get("xlsxFormat")
-    if isinstance(xlsx_fmt, str) and xlsx_fmt:
+    xss_fmt = style.get("format")
+    xss_fmt_l = xss_fmt.lower() if isinstance(xss_fmt, str) else None
+    has_xlsx_fmt = isinstance(xlsx_fmt, str) and bool(xlsx_fmt)
+
+    if xss_fmt_l in ("normal", "text", "general"):
+        # User explicitly cleared the format back to plain.
+        cell.number_format = "General"
+    elif has_xlsx_fmt and (
+        xss_fmt_l is None or _excel_to_xss_format(xlsx_fmt) == xss_fmt_l
+    ):
+        # Unchanged from the source workbook — restore the exact Excel format.
         cell.number_format = xlsx_fmt
-    else:
-        fmt = style.get("format")
-        if isinstance(fmt, str) and fmt:
-            mapped = _XSS_TO_EXCEL_FORMAT.get(fmt.lower())
-            if mapped:
-                cell.number_format = mapped
+    elif xss_fmt_l:
+        # User picked a different named format in the editor.
+        mapped = _XSS_TO_EXCEL_FORMAT.get(xss_fmt_l)
+        cell.number_format = mapped or "General"
 
     border = style.get("border")
     if isinstance(border, dict):

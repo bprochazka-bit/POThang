@@ -50,9 +50,33 @@
   .tpl-zoom button { width: 1.9rem; }
   .tpl-zoom .zlabel { min-width: 3rem; text-align: center;
                       color: var(--fg-muted); font-size: 0.85rem; }
-  /* CSS `zoom` (not transform) keeps x-spreadsheet's offsetX/Y mouse
-     mapping correct, so clicking still selects the right cell. */
-  .tpl-zoomwrap { overflow: auto; }
+  /* Zoom via transform:scale with origin 0,0. event.offsetX/Y (which
+     x-spreadsheet uses for hit-testing) are reported in the element's own
+     pre-transform coordinate space, so clicks stay accurate at any zoom —
+     unlike CSS `zoom`, which shifted the cursor mapping. */
+  .tpl-zoomwrap { overflow: auto; max-height: calc(100vh - 220px); }
+
+  /* x-spreadsheet's native scrollbars are too thin to grab. Fatten them
+     and give the thumb contrast. */
+  .tpl-editor-wrap .x-spreadsheet-scrollbar.horizontal { height: 16px; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar.vertical { width: 16px; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar::-webkit-scrollbar {
+    width: 16px; height: 16px; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar::-webkit-scrollbar-thumb {
+    background: #9aa6b2; border-radius: 8px; border: 3px solid #f4f5f8; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #6c7681; }
+  .tpl-editor-wrap .x-spreadsheet-scrollbar {
+    scrollbar-width: auto; scrollbar-color: #9aa6b2 #f4f5f8; }
+
+  /* The inline cell editor inherits `color` and has a transparent
+     background, so on a dark-filled cell the text was invisible. Force a
+     readable white box while editing. */
+  .tpl-editor-wrap .x-spreadsheet-editor .x-spreadsheet-editor-area {
+    background: #ffffff !important; }
+  .tpl-editor-wrap .x-spreadsheet-editor .x-spreadsheet-editor-area textarea,
+  .tpl-editor-wrap .x-spreadsheet-editor .x-spreadsheet-editor-area .textline {
+    background: #ffffff !important; color: #222 !important; }
 </style>
 
 <h1>
@@ -242,7 +266,19 @@
     var z = ZOOM_STEPS[zoomState[which]];
     var wrap = document.querySelector(
       '#' + which + '-pane .tpl-editor-wrap');
-    if (wrap) wrap.style.zoom = z;
+    if (wrap) {
+      wrap.style.transformOrigin = '0 0';
+      wrap.style.transform = z === 1 ? '' : 'scale(' + z + ')';
+      // Reserve layout space for the scaled box so the .tpl-zoomwrap
+      // shows correct scrollbars (transforms don't grow the layout box).
+      if (z > 1) {
+        wrap.style.marginRight = (wrap.offsetWidth * (z - 1)) + 'px';
+        wrap.style.marginBottom = (wrap.offsetHeight * (z - 1)) + 'px';
+      } else {
+        wrap.style.marginRight = '';
+        wrap.style.marginBottom = '';
+      }
+    }
     var lbl = document.getElementById(which + '-zlabel');
     if (lbl) lbl.textContent = Math.round(z * 100) + '%';
   }
