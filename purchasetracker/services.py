@@ -345,6 +345,18 @@ def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes,
        and the rows that originally followed are shifted down. The
        marker rows themselves are deleted.
 
+    Formulas (cells whose text begins with "=") flow through the same
+    substitution pipeline. Two tokens make formulas portable across loop
+    expansion:
+
+      - {{row}} inside the loop expands to the current line's absolute
+        row number, e.g. =C{{row}}*D{{row}} -> =C5*D5, =C6*D6, ...
+      - {{items.range.X}} (X = column letter) outside the loop expands to
+        the full column range of the expanded items, e.g.
+        =SUM({{items.range.E}}) -> =SUM(E5:E10). Companion tokens
+        {{items.first_row}}, {{items.last_row}}, {{items.count}} are also
+        available, and {{#if items}}...{{/if}} guards against empty POs.
+
     Lines are ordered by their stable line_no so the # column in the rendered
     document matches what the user sees in the web UI.
 
@@ -355,12 +367,35 @@ def render_po_xlsx(po: PurchaseOrder, template_bytes: bytes,
     context = _po_context(po, revision=revision)
 
     for ws in wb.worksheets:
-        _render_loop_region(ws, po)
-        _render_named_cells(ws, context)
+        items_info = _render_loop_region(ws, po)
+        ws_ctx = {**context, **_items_context(items_info)}
+        _render_named_cells(ws, ws_ctx)
 
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+def _items_context(items_info: Optional[dict]) -> dict:
+    """Context entries describing the expanded items region for a worksheet.
+
+    A truthy "items" key signals to {{#if items}} guards that items exist.
+    items_info is None when the worksheet has no {{#items}} block; in that
+    case we still surface falsy values so conditional guards work.
+    """
+    if items_info and items_info["count"] > 0:
+        return {
+            "items": True,
+            "items.first_row": items_info["first_row"],
+            "items.last_row": items_info["last_row"],
+            "items.count": items_info["count"],
+        }
+    return {
+        "items": False,
+        "items.first_row": "",
+        "items.last_row": "",
+        "items.count": 0,
+    }
 
 
 def _po_context(po: PurchaseOrder, revision: Optional[int] = None) -> dict:
@@ -432,11 +467,30 @@ def _substitute(text: str, ctx: dict) -> str:
 
     def repl(m):
         key = m.group(1)
+        if key.startswith("items.range."):
+            return _resolve_items_range(key[len("items.range."):], ctx, m.group(0))
         val = ctx.get(key)
         if val is None:
             return m.group(0)  # leave unknown placeholders untouched
         return str(val)
     return _PLACEHOLDER_RE.sub(repl, text)
+
+
+def _resolve_items_range(col: str, ctx: dict, original: str) -> str:
+    """Expand {{items.range.X}} to an Excel range like X5:X10.
+
+    Returns the original placeholder unchanged when items info is not yet in
+    ctx (loop pass) so the second pass can resolve it. When items info is
+    present but there are no expanded rows, returns "0" so wrapping
+    aggregates (SUM, AVERAGE, ...) remain valid.
+    """
+    if "items" not in ctx:
+        return original
+    first = ctx.get("items.first_row")
+    last = ctx.get("items.last_row")
+    if not first or not last:
+        return "0"
+    return f"{col}{first}:{col}{last}"
 
 
 def _cell_substitute(cell: Cell, ctx: dict) -> None:
@@ -481,10 +535,17 @@ def _find_loop_region(ws: Worksheet) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
+def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> Optional[dict]:
+    """Expand the {{#items}}/{{/items}} block in-place.
+
+    Returns a dict describing the expanded items region — keys "first_row",
+    "last_row" (1-indexed, inclusive), and "count" (number of PO lines) — so
+    callers can resolve {{items.range.X}} tokens in cells outside the loop.
+    Returns None when the worksheet has no loop region at all.
+    """
     region = _find_loop_region(ws)
     if region is None:
-        return
+        return None
     open_row, close_row = region
     template_rows = list(range(open_row + 1, close_row))
     template_height = len(template_rows)
@@ -542,7 +603,7 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
 
     if not lines:
         _reapply_external_merges(ws, external_merges, open_row, close_row, -rows_to_remove)
-        return
+        return {"first_row": open_row, "last_row": open_row - 1, "count": 0}
 
     if insert_count > 0:
         ws.insert_rows(open_row, amount=insert_count)
@@ -552,6 +613,10 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
         ctx = _line_context(line)
         line_base = write_row
         for tmpl_row in template:
+            # The row token resolves to this line's absolute row number, so
+            # per-row formulas like =C{{row}}*D{{row}} pick up the right refs
+            # after the template row is replicated for each line.
+            ctx["row"] = write_row
             if tmpl_row["height"] is not None:
                 ws.row_dimensions[write_row].height = tmpl_row["height"]
             for col_idx, src in enumerate(tmpl_row["cells"], start=1):
@@ -582,6 +647,12 @@ def _render_loop_region(ws: Worksheet, po: PurchaseOrder) -> None:
 
     delta = insert_count - rows_to_remove
     _reapply_external_merges(ws, external_merges, open_row, close_row, delta)
+
+    return {
+        "first_row": open_row,
+        "last_row": open_row + insert_count - 1,
+        "count": len(lines),
+    }
 
 
 def _reapply_external_merges(
