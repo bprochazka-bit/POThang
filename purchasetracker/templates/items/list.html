@@ -44,6 +44,17 @@
   <a href="{{ url_for('items.create') }}" class="btn">Add item</a>
 </form>
 
+{% set totals = namespace(qty=0, value=0.0) %}
+{% for item in items %}
+  {% set totals.qty = totals.qty + (item.qty or 0) %}
+  {% set totals.value = totals.value + item.estimated_total %}
+{% endfor %}
+<p class="meta" style="margin-top: -0.5rem;">
+  <strong>{{ items | length }}</strong> item{{ '' if items | length == 1 else 's' }}
+  &middot; total qty <strong>{{ totals.qty }}</strong>
+  &middot; est. value <strong>{{ totals.value | currency }}</strong>
+</p>
+
 {% set incomplete_total = items | rejectattr('is_complete') | list | length %}
 {% if incomplete_total and not completeness %}
 <p class="meta" style="margin-top: -0.5rem;">

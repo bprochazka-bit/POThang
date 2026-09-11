@@ -43,7 +43,7 @@ def recompute_item_state(item: Item) -> None:
                     OR the user manually flagged it approved.
       - requested : everything else.
 
-    Cancelled is terminal (user-set, never overwritten).
+    Cancelled and error are terminal (user-set, never overwritten).
 
     Draft and submitted POs intentionally do NOT advance item state - draft
     is a working state for the buyer and submitted means the PO is awaiting
@@ -51,7 +51,7 @@ def recompute_item_state(item: Item) -> None:
     still count toward qty_on_active_pos / qty_unallocated to prevent
     double-allocating an item to two POs at once.
     """
-    if item.state == "cancelled":
+    if item.state in ("cancelled", "error"):
         return  # terminal, user-set
 
     qty_total = item.qty or 0

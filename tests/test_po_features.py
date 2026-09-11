@@ -300,3 +300,114 @@ def test_receiving_caps_qty_at_outstanding(client, db):
                 follow_redirects=True)
     db.session.refresh(line)
     assert line.qty_received == 5
+
+
+# ---------- Receipt undo / edit (requirement #1) ----------
+
+def _seed_ordered_line(client, db, qty=5):
+    item, po = _seed_one_complete_item(db, qty=qty)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": str(qty)},
+                follow_redirects=True)
+    client.post(f"/pos/{po.id}/edit",
+                data={"vendor": "", "ship_to": "", "notes": "",
+                      "status": "ordered"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+    return item, po, line
+
+
+def test_delete_receipt_undoes_it(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "3"}, follow_redirects=True)
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+
+    client.post(f"/pos/receipts/{receipt.id}/delete", follow_redirects=True)
+    db.session.refresh(line)
+    assert line.qty_received == 0
+    assert db.session.query(Receipt).filter_by(line_id=line.id).count() == 0
+
+
+def test_update_receipt_changes_qty(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "3"}, follow_redirects=True)
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+
+    client.post(f"/pos/receipts/{receipt.id}/update",
+                data={"qty": "2"}, follow_redirects=True)
+    db.session.refresh(line)
+    assert line.qty_received == 2
+
+
+def test_update_receipt_over_ordered_is_rejected(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "3"}, follow_redirects=True)
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+
+    resp = client.post(f"/pos/receipts/{receipt.id}/update",
+                       data={"qty": "99"}, follow_redirects=True)
+    assert b"at most" in resp.data
+    db.session.refresh(line)
+    assert line.qty_received == 3  # unchanged
+
+
+def test_undo_receipt_reverts_po_from_received(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    # Fully receive -> PO becomes received.
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "5"}, follow_redirects=True)
+    db.session.refresh(po)
+    assert po.status == "received"
+
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+    client.post(f"/pos/receipts/{receipt.id}/delete", follow_redirects=True)
+    db.session.refresh(po)
+    # No longer fully received -> back to an active, receivable status.
+    assert po.status == "ordered"
+
+
+# ---------- AJAX receive (requirement #5) ----------
+
+def test_receive_line_returns_json_for_ajax(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.post(
+        f"/pos/lines/{line.id}/receive",
+        data={"qty": "2"},
+        headers={"X-Requested-With": "XMLHttpRequest",
+                 "Accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.is_json
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["line"]["qty_received"] == 2
+    assert payload["line"]["outstanding"] == 3
+    assert payload["po"]["total_received"] == 2
+    assert len(payload["line"]["receipts"]) == 1
+
+
+def test_receive_line_ajax_error_is_json(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.post(
+        f"/pos/lines/{line.id}/receive",
+        data={"qty": "0"},
+        headers={"X-Requested-With": "XMLHttpRequest",
+                 "Accept": "application/json"},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+# ---------- Receiving view counts & selection (requirement #3) ----------
+
+def test_receiving_view_shows_counts_and_lines(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.get(f"/pos/receiving/?po_id={po.id}")
+    assert resp.status_code == 200
+    # Summary block and the per-line receive control are present.
+    assert b"rcv-summary" in resp.data
+    assert b"Filter by item or vendor" in resp.data
+    assert b"Bolt" in resp.data

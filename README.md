@@ -11,11 +11,12 @@ pip; no Docker required.
 ## Features
 
 - Items with name, description, vendor, model, URL, estimated cost, qty, tags
-- States: `requested → approved → ordered → partial → received` plus `cancelled`
+- States: `requested → approved → ordered → partial → received` plus `cancelled` and `error` (a manual fault state that requires a free-text reason)
 - **Required-fields completeness**: items must have name, description, URL, vendor, qty, and price filled in before they can go on a PO. The items list visually marks incomplete rows and supports filtering by completeness.
 - **Quick add** workflow: a task-tag picker plus a single-row form for rapid stub entry (just a name + qty), with details filled in later via edit.
 - Purchase orders: group items (or partial qty of items) into POs, manual PO numbering
 - Partial receipt tracking with receipt history per line
+- **Receiving view**: receive lines inline (one click, no page reload), undo a receipt or change its received qty, filter lines by item/vendor or receipt status, and see live line/quantity counts
 - File attachments (quotes, images, datasheets) stored on disk with sha256 names
 - Filtering by state, completeness, cost range, tag, PO, vendor, free-text search
 - Import / export JSON (full fidelity) and CSV (flat item list, both legacy and modern formats accepted)

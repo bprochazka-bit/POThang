@@ -15,22 +15,45 @@
   <a href="{{ url_for('pos.create') }}" class="btn">New PO</a>
 </form>
 
+{% set total = namespace(lines=0, ordered=0, received=0, value=0.0) %}
+{% for po in pos %}
+  {% set total.lines = total.lines + (po.lines | length) %}
+  {% for line in po.lines %}
+    {% set total.ordered = total.ordered + line.qty %}
+    {% set total.received = total.received + line.qty_received %}
+  {% endfor %}
+  {% set total.value = total.value + po.total %}
+{% endfor %}
+{% if pos %}
+<p class="meta" style="margin-top: -0.5rem;">
+  <strong>{{ pos | length }}</strong> PO{{ '' if pos | length == 1 else 's' }}
+  &middot; <strong>{{ total.lines }}</strong> line{{ '' if total.lines == 1 else 's' }}
+  &middot; qty <strong>{{ total.received }}</strong> received / <strong>{{ total.ordered }}</strong> ordered
+  &middot; total <strong>{{ total.value | currency }}</strong>
+</p>
+{% endif %}
+
 <table class="data">
   <thead><tr>
-    <th>PO #</th><th>Vendor</th><th>Status</th><th>Lines</th><th>Total</th><th>Ordered</th>
+    <th>PO #</th><th>Vendor</th><th>Status</th><th>Lines</th>
+    <th class="num">Qty</th><th class="num">Received</th><th>Total</th><th>Ordered</th>
   </tr></thead>
   <tbody>
     {% for po in pos %}
+    {% set po_ordered = po.lines | sum(attribute='qty') %}
+    {% set po_received = po.lines | sum(attribute='qty_received') %}
     <tr>
       <td><a href="{{ url_for('pos.detail', po_id=po.id) }}">{{ po.po_number }}</a></td>
       <td>{{ po.vendor or '' }}</td>
-      <td>{{ po.status }}</td>
+      <td><span class="state state-{{ po.status }}">{{ po.status }}</span></td>
       <td>{{ po.lines | length }}</td>
+      <td class="num">{{ po_ordered }}</td>
+      <td class="num">{{ po_received }} / {{ po_ordered }}</td>
       <td>{{ po.total | currency }}</td>
       <td>{{ po.ordered_at.strftime('%Y-%m-%d') if po.ordered_at else '' }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="6"><em>No POs.</em></td></tr>
+    <tr><td colspan="8"><em>No POs.</em></td></tr>
     {% endfor %}
   </tbody>
 </table>

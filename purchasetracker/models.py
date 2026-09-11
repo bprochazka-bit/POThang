@@ -70,6 +70,9 @@ class Item(db.Model):
     unit_cost = Column(Float, nullable=False, default=0.0)
     notes = Column(Text)
     state = Column(String(32), nullable=False, default="requested", index=True)
+    # Free-text reason, required when state == "error". Cleared automatically
+    # when the item leaves the error state (see items.change_state).
+    error_reason = Column(Text)
     created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=dt.datetime.utcnow,
                         onupdate=dt.datetime.utcnow, nullable=False)
@@ -153,6 +156,7 @@ class Item(db.Model):
             "estimated_total": self.estimated_total,
             "notes": self.notes,
             "state": self.state,
+            "error_reason": self.error_reason,
             "tags": [t.name for t in self.tags],
             "is_complete": self.is_complete,
             "missing_fields": self.missing_fields,

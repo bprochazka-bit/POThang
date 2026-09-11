@@ -32,101 +32,268 @@
 
 {% if selected_po %}
 {% set po = selected_po %}
-<section class="card">
+<section class="card" id="receiving-card"
+         data-receive-tpl="{{ url_for('pos.receive_line', line_id=0) }}"
+         data-receipt-update-tpl="{{ url_for('pos.update_receipt', receipt_id=0) }}"
+         data-receipt-delete-tpl="{{ url_for('pos.delete_receipt', receipt_id=0) }}">
   <h2>
     <a href="{{ url_for('pos.detail', po_id=po.id) }}">PO {{ po.po_number }}</a>
-    <span class="state state-{{ po.status }}" style="margin-left: 0.5rem;">{{ po.status }}</span>
+    <span class="state state-{{ po.status }}" id="rcv-po-status" style="margin-left: 0.5rem;">{{ po.status }}</span>
   </h2>
-  <p class="meta">
-    {{ po.vendor or '(no vendor)' }}
-    &middot; {{ po.lines | length }} line{{ '' if po.lines|length == 1 else 's' }}
-    &middot; <strong>{{ po.total | currency }}</strong>
-  </p>
+  <p class="meta">{{ po.vendor or '(no vendor)' }}</p>
 
-  {% set ns = namespace(any_outstanding=false, fully_received=[]) %}
-  {% for line in po.lines %}
-    {% if line.qty - line.qty_received > 0 %}
-      {% set ns.any_outstanding = true %}
-    {% else %}
-      {% set ns.fully_received = ns.fully_received + [line] %}
-    {% endif %}
-  {% endfor %}
+  {# ---- Counts & quantities (requirement #3) ---- #}
+  <div class="rcv-summary" id="rcv-summary">
+    <span><strong id="sum-total-lines">{{ summary.total_lines }}</strong> line{{ '' if summary.total_lines == 1 else 's' }}</span>
+    <span><strong id="sum-outstanding-lines">{{ summary.outstanding_lines }}</strong> outstanding</span>
+    <span>ordered <strong id="sum-total-ordered">{{ summary.total_ordered }}</strong></span>
+    <span>received <strong id="sum-total-received">{{ summary.total_received }}</strong></span>
+    <span>remaining <strong id="sum-outstanding">{{ summary.outstanding }}</strong></span>
+  </div>
 
-  {% if ns.any_outstanding %}
-  <form method="post" action="{{ url_for('pos.receiving_receive', po_id=po.id) }}">
-    <table class="data">
-      <thead><tr>
-        <th>Item</th>
-        <th>Vendor</th>
-        <th>Ordered</th>
-        <th>Already received</th>
-        <th>Outstanding</th>
-        <th>Receive now</th>
-      </tr></thead>
-      <tbody>
-        {% for line in po.lines %}
-          {% set outstanding = line.qty - line.qty_received %}
-          {% if outstanding > 0 %}
-          <tr>
-            <td><a href="{{ url_for('items.detail', item_id=line.item_id) }}">{{ line.item.name if line.item else '(unknown)' }}</a></td>
-            <td>{{ line.item.vendor if line.item else '' }}</td>
-            <td>{{ line.qty }}</td>
-            <td>{{ line.qty_received }}</td>
-            <td><strong>{{ outstanding }}</strong></td>
-            <td>
-              <input type="number" name="qty_{{ line.id }}" min="0" max="{{ outstanding }}"
-                     value="0" style="width: 5em" data-outstanding="{{ outstanding }}">
-            </td>
-          </tr>
-          {% endif %}
-        {% endfor %}
-      </tbody>
-    </table>
+  {# ---- Filters (requirement #2) ---- #}
+  <div class="rcv-controls">
+    <input type="search" id="rcv-filter" placeholder="Filter by item or vendor…"
+           autocomplete="off">
+    <select id="rcv-status-filter">
+      <option value="outstanding">Outstanding only</option>
+      <option value="received">With receipts</option>
+      <option value="all">All lines</option>
+    </select>
+    <label style="color: var(--fg-muted); font-size: 0.85rem;">
+      Note (applied to each receipt):
+      <input type="text" id="rcv-note" maxlength="255" style="width: 14em; margin-left: 0.3rem;">
+    </label>
+  </div>
 
-    <div style="margin-top: 0.9rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
-      <button type="button" id="receiving-fill-all">Fill all to outstanding</button>
-      <button type="button" id="receiving-clear-all">Clear all</button>
-      <label style="color: var(--fg-muted); font-size: 0.85rem;">
-        Note (optional, applied to all receipts):
-        <input type="text" name="notes" maxlength="255" style="width: 18em; margin-left: 0.4rem;">
-      </label>
-      <button type="submit" class="btn">Receive</button>
-    </div>
-  </form>
+  <div class="rcv-msg" id="rcv-msg" hidden></div>
 
-  <script>
-  (function () {
-    var fill = document.getElementById('receiving-fill-all');
-    var clear = document.getElementById('receiving-clear-all');
-    var inputs = document.querySelectorAll('input[name^="qty_"]');
-    if (fill) fill.addEventListener('click', function () {
-      inputs.forEach(function (i) { i.value = i.dataset.outstanding || 0; });
-    });
-    if (clear) clear.addEventListener('click', function () {
-      inputs.forEach(function (i) { i.value = 0; });
-    });
-  })();
-  </script>
-
-  {% else %}
-  <p><em>This PO is fully received. Nothing outstanding.</em></p>
-  {% endif %}
-
-  {% if ns.fully_received %}
-  <h3>Already fully received</h3>
-  <table class="data">
-    <thead><tr><th>Item</th><th>Qty</th></tr></thead>
+  {% if summary.total_lines %}
+  <table class="data" id="rcv-table">
+    <thead><tr>
+      <th>Item</th>
+      <th>Vendor</th>
+      <th>Ordered</th>
+      <th>Received</th>
+      <th>Outstanding</th>
+      <th>Receive now</th>
+    </tr></thead>
     <tbody>
-      {% for line in ns.fully_received %}
-      <tr>
-        <td>{{ line.item.name if line.item else '(unknown)' }}</td>
-        <td>{{ line.qty_received }} / {{ line.qty }}</td>
+      {% for line in po.lines %}
+      {% set outstanding = line.qty - line.qty_received %}
+      <tr class="rcv-line" data-line-id="{{ line.id }}"
+          data-name="{{ (line.item.name if line.item else '') | lower }}"
+          data-vendor="{{ (line.item.vendor if line.item else '') | lower }}"
+          data-outstanding="{{ outstanding }}"
+          data-received="{{ line.qty_received }}">
+        <td><a href="{{ url_for('items.detail', item_id=line.item_id) }}">{{ line.item.name if line.item else '(unknown)' }}</a></td>
+        <td>{{ line.item.vendor if line.item else '' }}</td>
+        <td class="num">{{ line.qty }}</td>
+        <td class="num rcv-received-cell">{{ line.qty_received }}</td>
+        <td class="num rcv-outstanding-cell"><strong>{{ outstanding }}</strong></td>
+        <td>
+          <form class="rcv-form inline" method="post"
+                action="{{ url_for('pos.receive_line', line_id=line.id) }}">
+            <input type="number" name="qty" class="rcv-qty" min="1"
+                   max="{{ outstanding }}" value="{{ outstanding }}"
+                   style="width: 5em" {% if outstanding <= 0 %}disabled{% endif %}>
+            <button type="submit" class="rcv-btn"
+                    {% if outstanding <= 0 %}disabled{% endif %}>Receive</button>
+          </form>
+        </td>
+      </tr>
+      <tr class="rcv-receipts-row" data-receipts-for="{{ line.id }}"
+          {% if not line.receipts %}hidden{% endif %}>
+        <td></td>
+        <td colspan="5">
+          <div class="rcv-receipts">{% include "pos/_receipts.html" %}</div>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+
+  {# No-JS / bulk fallback: receive every outstanding line at once. #}
+  <form method="post" action="{{ url_for('pos.receiving_receive', po_id=po.id) }}"
+        id="rcv-all-form" style="margin-top: 0.9rem;"
+        onsubmit="return confirm('Receive all outstanding quantities on this PO?');">
+    {% for line in po.lines %}
+      {% set outstanding = line.qty - line.qty_received %}
+      {% if outstanding > 0 %}
+        <input type="hidden" name="qty_{{ line.id }}" value="{{ outstanding }}">
+      {% endif %}
+    {% endfor %}
+    <button type="submit">Receive all outstanding</button>
+    <small style="color: var(--fg-muted); margin-left: 0.4rem;">fills every line to its outstanding qty</small>
+  </form>
+  {% else %}
+  <p><em>This PO has no lines to receive.</em></p>
   {% endif %}
 </section>
+
+<script>
+(function () {
+  var card = document.getElementById('receiving-card');
+  if (!card) return;
+  var table = document.getElementById('rcv-table');
+  var filterInput = document.getElementById('rcv-filter');
+  var statusFilter = document.getElementById('rcv-status-filter');
+  var noteInput = document.getElementById('rcv-note');
+  var msgBox = document.getElementById('rcv-msg');
+
+  var receiveTpl = card.dataset.receiveTpl;          // .../lines/0/receive
+  var receiptUpdateTpl = card.dataset.receiptUpdateTpl; // .../receipts/0/update
+  var receiptDeleteTpl = card.dataset.receiptDeleteTpl; // .../receipts/0/delete
+
+  function urlWithId(tpl, id) { return tpl.replace('/0/', '/' + id + '/'); }
+
+  function showMsg(text, isError) {
+    if (!msgBox) return;
+    msgBox.textContent = text;
+    msgBox.hidden = false;
+    msgBox.className = 'rcv-msg ' + (isError ? 'rcv-msg-error' : 'rcv-msg-ok');
+    clearTimeout(showMsg._t);
+    showMsg._t = setTimeout(function () { msgBox.hidden = true; }, 4000);
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+
+  // Build the receipts markup for one line (mirrors pos/_receipts.html).
+  function receiptsHtml(line) {
+    return line.receipts.map(function (r) {
+      var upd = urlWithId(receiptUpdateTpl, r.id);
+      var del = urlWithId(receiptDeleteTpl, r.id);
+      return '<span class="receipt-chip" data-receipt-id="' + r.id + '">' +
+        '<form class="receipt-edit inline" method="post" action="' + upd + '">' +
+          '<input type="number" name="qty" value="' + r.qty + '" min="1" style="width:4em">' +
+          '<button type="submit" title="Save quantity">save</button>' +
+        '</form>' +
+        '<small> on ' + esc(r.received_at) + (r.notes ? ' (' + esc(r.notes) + ')' : '') + ' </small>' +
+        '<form class="receipt-del inline" method="post" action="' + del + '">' +
+          '<button type="submit" class="link" title="Undo this receipt">undo</button>' +
+        '</form>' +
+      '</span>';
+    }).join('');
+  }
+
+  function applyLine(lineEl, line) {
+    lineEl.dataset.outstanding = line.outstanding;
+    lineEl.dataset.received = line.qty_received;
+    lineEl.querySelector('.rcv-received-cell').textContent = line.qty_received;
+    lineEl.querySelector('.rcv-outstanding-cell').innerHTML =
+      '<strong>' + line.outstanding + '</strong>';
+    var qty = lineEl.querySelector('.rcv-qty');
+    var btn = lineEl.querySelector('.rcv-btn');
+    qty.max = line.outstanding;
+    qty.value = line.outstanding > 0 ? line.outstanding : '';
+    qty.disabled = line.outstanding <= 0;
+    btn.disabled = line.outstanding <= 0;
+
+    var recRow = table.querySelector('tr[data-receipts-for="' + line.id + '"]');
+    if (recRow) {
+      recRow.querySelector('.rcv-receipts').innerHTML = receiptsHtml(line);
+      recRow.hidden = line.receipts.length === 0;
+    }
+    applyFilter();
+  }
+
+  function applySummary(po) {
+    function set(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }
+    set('sum-total-lines', po.total_lines);
+    set('sum-outstanding-lines', po.outstanding_lines);
+    set('sum-total-ordered', po.total_ordered);
+    set('sum-total-received', po.total_received);
+    set('sum-outstanding', po.outstanding);
+    var badge = document.getElementById('rcv-po-status');
+    if (badge && po.status) {
+      badge.textContent = po.status;
+      badge.className = 'state state-' + po.status;
+    }
+  }
+
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body,
+    }).then(function (resp) { return resp.json().then(function (d) {
+      return { ok: resp.ok, data: d };
+    }); });
+  }
+
+  function handle(result, lineEl) {
+    if (!result.ok || !result.data.ok) {
+      showMsg(result.data.error || 'Something went wrong.', true);
+      return;
+    }
+    if (result.data.line && lineEl) applyLine(lineEl, result.data.line);
+    if (result.data.po) applySummary(result.data.po);
+    showMsg(result.data.message || 'Done.', false);
+  }
+
+  // Delegate all three form submits (receive, edit receipt, undo receipt).
+  table.addEventListener('submit', function (ev) {
+    var form = ev.target;
+    if (form.classList.contains('rcv-form')) {
+      ev.preventDefault();
+      var qtyEl = form.querySelector('.rcv-qty');
+      var qty = parseInt(qtyEl.value, 10);
+      if (!qty || qty <= 0) { showMsg('Enter a quantity to receive.', true); return; }
+      var params = 'qty=' + encodeURIComponent(qty);
+      if (noteInput && noteInput.value.trim()) {
+        params += '&notes=' + encodeURIComponent(noteInput.value.trim());
+      }
+      post(form.action, params).then(function (r) { handle(r, form.closest('.rcv-line')); });
+    } else if (form.classList.contains('receipt-edit')) {
+      ev.preventDefault();
+      var row = form.closest('.rcv-receipts-row');
+      var target = table.querySelector('.rcv-line[data-line-id="' + row.dataset.receiptsFor + '"]');
+      var q = parseInt(form.querySelector('input[name="qty"]').value, 10);
+      post(form.action, 'qty=' + encodeURIComponent(q || 0)).then(function (r) { handle(r, target); });
+    } else if (form.classList.contains('receipt-del')) {
+      ev.preventDefault();
+      if (!confirm('Undo this receipt?')) return;
+      var row2 = form.closest('.rcv-receipts-row');
+      var target2 = table.querySelector('.rcv-line[data-line-id="' + row2.dataset.receiptsFor + '"]');
+      post(form.action, '').then(function (r) { handle(r, target2); });
+    }
+  });
+
+  // ---- Filtering ----
+  function applyFilter() {
+    var text = (filterInput.value || '').trim().toLowerCase();
+    var mode = statusFilter.value;
+    table.querySelectorAll('tr.rcv-line').forEach(function (row) {
+      var matchText = !text ||
+        row.dataset.name.indexOf(text) !== -1 ||
+        row.dataset.vendor.indexOf(text) !== -1;
+      var out = parseInt(row.dataset.outstanding, 10) || 0;
+      var rec = parseInt(row.dataset.received, 10) || 0;
+      var matchStatus = mode === 'all' ||
+        (mode === 'outstanding' && out > 0) ||
+        (mode === 'received' && rec > 0);
+      var show = matchText && matchStatus;
+      row.hidden = !show;
+      var recRow = table.querySelector('tr[data-receipts-for="' + row.dataset.lineId + '"]');
+      if (recRow) {
+        // Keep the receipts row visible only when its line is shown AND it has receipts.
+        recRow.hidden = !show || recRow.querySelector('.receipt-chip') === null;
+      }
+    });
+  }
+  filterInput.addEventListener('input', applyFilter);
+  statusFilter.addEventListener('change', applyFilter);
+  applyFilter();
+})();
+</script>
 {% endif %}
 
 {% endblock %}

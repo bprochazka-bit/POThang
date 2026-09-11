@@ -21,6 +21,7 @@ def run_migrations() -> None:
     """Run all schema migrations. Called from create_app under app_context."""
     _migrate_add_item_name()
     _migrate_add_po_line_no()
+    _migrate_add_item_error_reason()
 
 
 def _migrate_add_item_name() -> None:
@@ -84,3 +85,21 @@ def _migrate_add_po_line_no() -> None:
                   AND p2.id <= po_lines.id
             )
         """))
+
+
+def _migrate_add_item_error_reason() -> None:
+    """v7: add items.error_reason for the manual "error" state.
+
+    The error state carries a free-text explanation the user types when they
+    flag an item as faulty. Older DBs have no such column; add it (nullable).
+    """
+    insp = inspect(db.engine)
+    if "items" not in insp.get_table_names():
+        return  # fresh DB, create_all() sets up the new schema directly
+
+    cols = {c["name"] for c in insp.get_columns("items")}
+    if "error_reason" in cols:
+        return  # already migrated
+
+    with db.engine.begin() as conn:
+        conn.execute(text("ALTER TABLE items ADD COLUMN error_reason TEXT"))

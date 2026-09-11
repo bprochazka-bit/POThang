@@ -164,6 +164,17 @@
 <section class="card">
   <h2>Lines</h2>
   {% if ordered_lines %}
+  {% set line_totals = namespace(ordered=0, received=0) %}
+  {% for line in ordered_lines %}
+    {% set line_totals.ordered = line_totals.ordered + line.qty %}
+    {% set line_totals.received = line_totals.received + line.qty_received %}
+  {% endfor %}
+  <p class="meta" style="margin-top: 0;">
+    <strong>{{ ordered_lines | length }}</strong> line{{ '' if ordered_lines | length == 1 else 's' }}
+    &middot; qty <strong>{{ line_totals.received }}</strong> received / <strong>{{ line_totals.ordered }}</strong> ordered
+    &middot; <strong>{{ line_totals.ordered - line_totals.received }}</strong> outstanding
+  </p>{% endif %}
+  {% if ordered_lines %}
   <table class="data" id="po-lines-table">
     <thead><tr>
       <th>#</th>

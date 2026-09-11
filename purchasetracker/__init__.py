@@ -31,6 +31,14 @@ def create_app(config_overrides=None):
     if config_overrides:
         app.config.update(config_overrides)
 
+    # "error" is a built-in terminal state the app now depends on. Ensure it's
+    # present even for installs whose instance/config.py predates it (that copy
+    # overrides the package default and would otherwise drop the state).
+    states = list(app.config.get("ITEM_STATES") or [])
+    if "error" not in states:
+        states.append("error")
+        app.config["ITEM_STATES"] = states
+
     # Resolve UPLOAD_DIR relative to the project root if it's not absolute.
     upload_dir = Path(app.config["UPLOAD_DIR"])
     if not upload_dir.is_absolute():
