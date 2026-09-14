@@ -355,7 +355,8 @@ def receive_line(line_id: int):
     if _wants_json():
         return jsonify({"ok": True, "message": msg,
                         "line": _line_receiving_state(line),
-                        "po": _po_receiving_summary(line.po)})
+                        "po": _po_receiving_summary(line.po),
+                        "tag_summary": _receiving_tag_summary(line.po)})
     flash(msg)
     return redirect(url_for("pos.detail", po_id=line.po_id))
 
@@ -392,7 +393,8 @@ def update_receipt(receipt_id: int):
     if _wants_json():
         return jsonify({"ok": True, "message": msg,
                         "line": _line_receiving_state(line),
-                        "po": _po_receiving_summary(line.po)})
+                        "po": _po_receiving_summary(line.po),
+                        "tag_summary": _receiving_tag_summary(line.po)})
     flash(msg)
     return redirect(url_for("pos.detail", po_id=po_id))
 
@@ -414,7 +416,8 @@ def delete_receipt(receipt_id: int):
         # line may still exist; reload state from the (now flushed) line.
         return jsonify({"ok": True, "message": msg,
                         "line": _line_receiving_state(line),
-                        "po": _po_receiving_summary(line.po)})
+                        "po": _po_receiving_summary(line.po),
+                        "tag_summary": _receiving_tag_summary(line.po)})
     flash(msg)
     return redirect(url_for("pos.detail", po_id=po_id))
 
@@ -498,6 +501,67 @@ def _po_receiving_summary(po: PurchaseOrder) -> dict:
     }
 
 
+# Receiving statuses used by the by-tag breakdown, in display order.
+RECEIVING_STATUSES = ["outstanding", "partial", "received", "error", "cancelled"]
+
+
+def _classify_line(line: POLine) -> str:
+    """Bucket a PO line into a single receiving status.
+
+    The item's manual terminal states (cancelled, error) take precedence over
+    receipt progress; otherwise the bucket reflects how much of THIS line has
+    been received.
+    """
+    item = line.item
+    if item is not None and item.state == "cancelled":
+        return "cancelled"
+    if item is not None and item.state == "error":
+        return "error"
+    received = line.qty_received
+    if line.qty > 0 and received >= line.qty:
+        return "received"
+    if received > 0:
+        return "partial"
+    return "outstanding"
+
+
+def _receiving_tag_summary(po: PurchaseOrder) -> dict:
+    """Count the PO's items by receiving status, grouped by tag.
+
+    An item with several tags is counted under each of its tags, so the tag
+    rows deliberately do not sum to the distinct-item totals. Untagged items
+    fall into their own row, and a totals row counts each line once.
+    """
+    def empty():
+        return {s: 0 for s in RECEIVING_STATUSES}
+
+    tags: dict[str, dict] = {}
+    untagged = empty()
+    totals = empty()
+    has_untagged = False
+
+    for line in (po.lines if po else []):
+        status = _classify_line(line)
+        totals[status] += 1
+        names = [t.name for t in line.item.tags] if line.item else []
+        if names:
+            for name in names:
+                tags.setdefault(name, empty())[status] += 1
+        else:
+            has_untagged = True
+            untagged[status] += 1
+
+    def row(label, counts):
+        return {"tag": label, "counts": counts, "total": sum(counts.values())}
+
+    return {
+        "statuses": RECEIVING_STATUSES,
+        "rows": [row(name, tags[name]) for name in sorted(tags)],
+        "untagged": row("(untagged)", untagged) if has_untagged else None,
+        "totals": row("All items", totals),
+    }
+
+
 # ---------- Receiving workflow ----------
 
 def _receivable_pos():
@@ -524,16 +588,19 @@ def receiving_index():
     pos = _receivable_pos()
     selected_po = None
     summary = None
+    tag_summary = None
     if selected_id is not None:
         selected_po = db.session.get(PurchaseOrder, selected_id)
         if selected_po is None:
             abort(404)
         summary = _po_receiving_summary(selected_po)
+        tag_summary = _receiving_tag_summary(selected_po)
     return render_template(
         "pos/receiving.html",
         pos=pos,
         selected_po=selected_po,
         summary=summary,
+        tag_summary=tag_summary,
     )
 
 

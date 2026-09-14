@@ -51,6 +51,52 @@
     <span>remaining <strong id="sum-outstanding">{{ summary.outstanding }}</strong></span>
   </div>
 
+  {# ---- By-tag receiving breakdown ---- #}
+  {% set status_state = {'outstanding': 'ordered', 'partial': 'partial',
+                         'received': 'received', 'error': 'error',
+                         'cancelled': 'cancelled'} %}
+  <details class="rcv-tag-summary" id="rcv-tag-summary" open>
+    <summary>Items by tag &amp; status</summary>
+    <p class="meta" style="margin: 0.3rem 0 0.5rem;">
+      Counts of this PO's items in each receiving status, grouped by tag. Items
+      with several tags are counted under each tag, so tag rows need not sum to
+      <strong>All items</strong>.
+    </p>
+    <div style="overflow-x: auto;">
+    <table class="data rcv-tag-table">
+      <thead><tr>
+        <th>Tag</th>
+        {% for s in tag_summary.statuses %}
+        <th class="num"><span class="state state-{{ status_state[s] }}">{{ s }}</span></th>
+        {% endfor %}
+        <th class="num">Total</th>
+      </tr></thead>
+      <tbody id="rcv-tag-tbody">
+        {% macro tag_row(row, statuses, cls='') -%}
+        <tr class="{{ cls }}">
+          <td>{{ row.tag }}</td>
+          {% for s in statuses %}
+          <td class="num {% if not row.counts[s] %}zero{% endif %}">{{ row.counts[s] }}</td>
+          {% endfor %}
+          <td class="num"><strong>{{ row.total }}</strong></td>
+        </tr>
+        {%- endmacro %}
+        {% for row in tag_summary.rows %}
+          {{ tag_row(row, tag_summary.statuses) }}
+        {% else %}
+          {% if not tag_summary.untagged %}
+          <tr><td colspan="{{ tag_summary.statuses | length + 2 }}"><em>No tagged items on this PO.</em></td></tr>
+          {% endif %}
+        {% endfor %}
+        {% if tag_summary.untagged %}
+          {{ tag_row(tag_summary.untagged, tag_summary.statuses, 'rcv-tag-untagged') }}
+        {% endif %}
+        {{ tag_row(tag_summary.totals, tag_summary.statuses, 'rcv-tag-total') }}
+      </tbody>
+    </table>
+    </div>
+  </details>
+
   {# ---- Filters (requirement #2) ---- #}
   <div class="rcv-controls">
     <input type="search" id="rcv-filter" placeholder="Filter by item or vendor…"
@@ -229,6 +275,31 @@
     }); });
   }
 
+  // ---- By-tag summary live re-render ----
+  var tagTbody = document.getElementById('rcv-tag-tbody');
+
+  function tagRowHtml(row, statuses, cls) {
+    var cells = statuses.map(function (s) {
+      var n = row.counts[s] || 0;
+      return '<td class="num' + (n ? '' : ' zero') + '">' + n + '</td>';
+    }).join('');
+    return '<tr' + (cls ? ' class="' + cls + '"' : '') + '>' +
+      '<td>' + esc(row.tag) + '</td>' + cells +
+      '<td class="num"><strong>' + row.total + '</strong></td></tr>';
+  }
+
+  function renderTagSummary(data) {
+    if (!tagTbody || !data) return;
+    var html = data.rows.map(function (r) { return tagRowHtml(r, data.statuses, ''); }).join('');
+    if (!data.rows.length && !data.untagged) {
+      html = '<tr><td colspan="' + (data.statuses.length + 2) +
+        '"><em>No tagged items on this PO.</em></td></tr>';
+    }
+    if (data.untagged) html += tagRowHtml(data.untagged, data.statuses, 'rcv-tag-untagged');
+    html += tagRowHtml(data.totals, data.statuses, 'rcv-tag-total');
+    tagTbody.innerHTML = html;
+  }
+
   function handle(result, lineEl) {
     if (!result.ok || !result.data.ok) {
       showMsg(result.data.error || 'Something went wrong.', true);
@@ -236,6 +307,7 @@
     }
     if (result.data.line && lineEl) applyLine(lineEl, result.data.line);
     if (result.data.po) applySummary(result.data.po);
+    if (result.data.tag_summary) renderTagSummary(result.data.tag_summary);
     showMsg(result.data.message || 'Done.', false);
   }
 

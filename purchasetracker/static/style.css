@@ -511,3 +511,16 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 .receipt-chip form.inline { margin: 0; gap: 0.25rem; }
 .receipt-chip small { color: var(--fg-muted); }
+
+.rcv-tag-summary { margin: 0.2rem 0 0.9rem; }
+.rcv-tag-summary > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--fg);
+  padding: 0.2rem 0;
+}
+.rcv-tag-table { margin-top: 0.4rem; }
+.rcv-tag-table th .state { text-transform: capitalize; }
+.rcv-tag-table td.zero { color: var(--fg-subtle); }
+.rcv-tag-table tr.rcv-tag-total td { border-top: 1px solid var(--border); font-weight: 600; background: var(--surface-2); }
+.rcv-tag-table tr.rcv-tag-untagged td:first-child { color: var(--fg-muted); font-style: italic; }

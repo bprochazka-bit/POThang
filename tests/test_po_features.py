@@ -411,3 +411,78 @@ def test_receiving_view_shows_counts_and_lines(client, db):
     assert b"rcv-summary" in resp.data
     assert b"Filter by item or vendor" in resp.data
     assert b"Bolt" in resp.data
+
+
+# ---------- By-tag receiving summary ----------
+
+def _tagged_line(db, po, name, qty, tags, state=None, received=0):
+    item = Item(name=name, description="d", qty=qty, unit_cost=1.0,
+                vendor="V", url="http://x")
+    db.session.add(item)
+    db.session.flush()
+    item.tags = [get_or_create_tag(t) for t in tags]
+    if state:
+        item.state = state
+    line = POLine(po_id=po.id, item_id=item.id, qty=qty, unit_cost=1.0)
+    db.session.add(line)
+    db.session.flush()
+    if received:
+        line.receipts.append(Receipt(qty=received))
+    db.session.commit()
+    return item, line
+
+
+def test_tag_summary_counts_by_status_and_tag(db):
+    from purchasetracker.blueprints.pos import _receiving_tag_summary
+    po = PurchaseOrder(po_number="PO-TS", status="ordered")
+    db.session.add(po)
+    db.session.flush()
+    _tagged_line(db, po, "A", 5, ["ProjX", "Sub1"])                 # outstanding
+    _tagged_line(db, po, "B", 4, ["ProjX"], received=4)             # received
+    _tagged_line(db, po, "C", 6, ["ProjX", "Sub2"], received=2)     # partial
+    _tagged_line(db, po, "E", 3, ["Sub1"], state="error")          # error
+    _tagged_line(db, po, "X", 2, [], state="cancelled")            # cancelled/untagged
+
+    ts = _receiving_tag_summary(po)
+    rows = {r["tag"]: r for r in ts["rows"]}
+
+    # Multi-tag item counted under each tag.
+    assert rows["ProjX"]["counts"] == {
+        "outstanding": 1, "partial": 1, "received": 1, "error": 0, "cancelled": 0}
+    assert rows["ProjX"]["total"] == 3
+    assert rows["Sub1"]["counts"]["outstanding"] == 1
+    assert rows["Sub1"]["counts"]["error"] == 1
+    assert rows["Sub2"]["counts"]["partial"] == 1
+
+    # Untagged bucket holds the cancelled item.
+    assert ts["untagged"]["counts"]["cancelled"] == 1
+
+    # Totals count each line exactly once.
+    assert ts["totals"]["counts"] == {
+        "outstanding": 1, "partial": 1, "received": 1, "error": 1, "cancelled": 1}
+    assert ts["totals"]["total"] == 5
+
+
+def test_tag_summary_state_takes_precedence_over_receipts(db):
+    """A received-but-errored item is bucketed as error, not received."""
+    from purchasetracker.blueprints.pos import _receiving_tag_summary
+    po = PurchaseOrder(po_number="PO-TS2", status="ordered")
+    db.session.add(po)
+    db.session.flush()
+    _tagged_line(db, po, "Q", 5, ["ProjY"], state="error", received=5)
+
+    ts = _receiving_tag_summary(po)
+    row = ts["rows"][0]
+    assert row["counts"]["error"] == 1
+    assert row["counts"]["received"] == 0
+
+
+def test_tag_summary_in_ajax_payload(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.post(
+        f"/pos/lines/{line.id}/receive", data={"qty": "5"},
+        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+    )
+    payload = resp.get_json()
+    assert "tag_summary" in payload
+    assert payload["tag_summary"]["totals"]["counts"]["received"] == 1
