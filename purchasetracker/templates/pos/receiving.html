@@ -2,6 +2,8 @@
 {% block title %}Receiving &middot; PurchaseTracker{% endblock %}
 {% block content %}
 <h1>Receiving</h1>
+<p class="meta"><a href="{{ url_for('pos.shipments') }}">Received shipments by day &rarr;</a>
+  (double-check what has been received)</p>
 
 <form method="get" action="{{ url_for('pos.receiving_index') }}" class="filters">
   <label style="color: var(--fg-muted); font-size: 0.85rem;">Pick a PO:</label>

@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}Received shipments &middot; PurchaseTracker{% endblock %}
+{% block content %}
+<div class="shp-head">
+  <h1>Received shipments</h1>
+  <div class="shp-head-actions no-print">
+    <a href="{{ url_for('pos.receiving_index') }}">&larr; Receiving</a>
+    <button type="button" onclick="window.print()">Print</button>
+  </div>
+</div>
+<p class="meta">
+  Every receipt, grouped by the day it was recorded and then by PO, so a second
+  person can check each one against the packing slip and tick it off.
+</p>
+
+<form method="get" action="{{ url_for('pos.shipments') }}" class="filters no-print" id="shp-filters">
+  <label>From <input type="date" name="from" value="{{ start.isoformat() if start else '' }}"></label>
+  <label>To <input type="date" name="to" value="{{ end.isoformat() if end else '' }}"></label>
+  <select name="po_id">
+    <option value="">All POs</option>
+    {% for p in po_choices %}
+      <option value="{{ p.id }}" {% if po_id == p.id %}selected{% endif %}>
+        {{ p.po_number }}{% if p.vendor %} - {{ p.vendor }}{% endif %}
+      </option>
+    {% endfor %}
+  </select>
+  <select name="verified">
+    <option value="" {% if not verified_arg %}selected{% endif %}>Verified &amp; unverified</option>
+    <option value="no" {% if verified_arg == 'no' %}selected{% endif %}>Unverified only</option>
+    <option value="yes" {% if verified_arg == 'yes' %}selected{% endif %}>Verified only</option>
+  </select>
+  <input type="search" name="q" value="{{ search }}" placeholder="Item, model, vendor, PO, note…">
+  <button type="submit">Apply</button>
+  <a href="{{ url_for('pos.shipments', **{'from': today.isoformat(), 'to': today.isoformat()}) }}">today</a>
+  <a href="{{ url_for('pos.shipments') }}">last 14 days</a>
+  <a href="{{ url_for('pos.shipments', all=1) }}">all time</a>
+</form>
+
+<div class="rcv-summary" id="shp-totals">
+  <span>
+    {% if show_all and not start and not end %}All time
+    {% elif start and end and start == end %}{{ start.strftime('%a %b %-d, %Y') }}
+    {% else %}{{ start.isoformat() if start else 'beginning' }} &rarr; {{ end.isoformat() if end else 'today' }}{% endif %}
+  </span>
+  <span><strong>{{ days | length }}</strong> day{{ '' if days|length == 1 else 's' }}</span>
+  <span><strong>{{ totals.receipts }}</strong> receipt{{ '' if totals.receipts == 1 else 's' }}</span>
+  <span><strong>{{ totals.units }}</strong> unit{{ '' if totals.units == 1 else 's' }}</span>
+  <span>verified <strong id="shp-verified-total">{{ totals.verified }}</strong> / {{ totals.receipts }}</span>
+</div>
+
+<div class="rcv-msg no-print" id="shp-msg" hidden></div>
+
+{% if not days %}
+<section class="card"><p><em>No receipts match these filters.</em></p></section>
+{% endif %}
+
+{% macro bulk_form(receipt_ids, label, verified=1, cls='') -%}
+<form method="post" action="{{ url_for('pos.verify_receipts_bulk') }}" class="inline shp-bulk no-print {{ cls }}">
+  {% for rid in receipt_ids %}<input type="hidden" name="receipt_ids" value="{{ rid }}">{% endfor %}
+  <input type="hidden" name="verified" value="{{ verified }}">
+  <button type="submit">{{ label }}</button>
+</form>
+{%- endmacro %}
+
+{% for day in days %}
+{% set day_ids = [] %}
+{% for g in day.po_groups %}{% for e in g.receipts %}{% set _ = day_ids.append(e.receipt.id) %}{% endfor %}{% endfor %}
+<section class="card shp-day {% if day.all_verified %}shp-done{% endif %}" data-day="{{ day.date.isoformat() }}">
+  <div class="shp-day-head">
+    <h2>
+      {{ day.date.strftime('%A, %B %-d, %Y') }}
+      {% if day.date == today %}<span class="state state-approved">today</span>{% endif %}
+    </h2>
+    <div class="shp-day-stats">
+      <span><strong>{{ day.receipt_count }}</strong> receipt{{ '' if day.receipt_count == 1 else 's' }}</span>
+      <span><strong>{{ day.units }}</strong> unit{{ '' if day.units == 1 else 's' }}</span>
+      <span><strong>{{ day.item_count }}</strong> item{{ '' if day.item_count == 1 else 's' }}</span>
+      <span>{{ day.po_groups | length }} PO{{ '' if day.po_groups|length == 1 else 's' }}</span>
+      <span class="shp-progress">verified <strong class="shp-vcount">{{ day.verified_count }}</strong> / <span class="shp-vtotal">{{ day.receipt_count }}</span></span>
+      {{ bulk_form(day_ids, 'Verify whole day') }}
+    </div>
+  </div>
+
+  {% for g in day.po_groups %}
+  {% set po = g.po %}
+  <div class="shp-po {% if g.all_verified %}shp-done{% endif %}">
+    <h3>
+      {% if po %}<a href="{{ url_for('pos.detail', po_id=po.id) }}">PO {{ po.po_number }}</a>
+        <span class="meta">{{ po.vendor or '' }}</span>
+        <span class="state state-{{ po.status }}">{{ po.status }}</span>
+      {% else %}(no PO){% endif %}
+      <span class="meta shp-po-stats">
+        {{ g.receipt_count }} receipt{{ '' if g.receipt_count == 1 else 's' }},
+        {{ g.units }} unit{{ '' if g.units == 1 else 's' }} &middot;
+        verified <span class="shp-vcount">{{ g.verified_count }}</span>/<span class="shp-vtotal">{{ g.receipt_count }}</span>
+      </span>
+      {{ bulk_form(g.receipts | map(attribute='receipt.id') | list, 'Verify PO') }}
+    </h3>
+    <div class="shp-table-wrap">
+    <table class="data shp-table">
+      <thead><tr>
+        <th class="shp-check-col">✓</th>
+        <th>Time</th>
+        <th>#</th>
+        <th>Item</th>
+        <th>Model / SKU</th>
+        <th class="num">Rcvd</th>
+        <th class="num">Line total</th>
+        <th>By</th>
+        <th>Notes</th>
+      </tr></thead>
+      <tbody>
+        {% for e in g.receipts %}
+        {% set r = e.receipt %}{% set line = e.line %}{% set item = e.item %}
+        <tr class="shp-row {% if r.is_verified %}shp-verified{% endif %}" data-receipt-id="{{ r.id }}">
+          <td class="shp-check-col">
+            <form method="post" action="{{ url_for('pos.verify_receipt', receipt_id=r.id) }}" class="inline shp-verify">
+              <input type="hidden" name="verified" value="{{ 0 if r.is_verified else 1 }}">
+              <button type="submit" class="shp-vbtn" aria-pressed="{{ 'true' if r.is_verified else 'false' }}"
+                      title="{% if r.is_verified %}Verified by {{ r.verified_by or '?' }} - click to clear{% else %}Mark verified{% endif %}">
+                {{ '✓' if r.is_verified else '' }}
+              </button>
+            </form>
+          </td>
+          <td>{{ e.local_time.strftime('%H:%M') }}</td>
+          <td>{{ line.line_no if line else '' }}</td>
+          <td>
+            {% if item %}<a href="{{ url_for('items.detail', item_id=item.id) }}">{{ item.name }}</a>
+              {% if item.vendor and (not po or item.vendor != po.vendor) %}<br><small>{{ item.vendor }}</small>{% endif %}
+            {% else %}(unknown){% endif %}
+          </td>
+          <td><small>{{ item.model or '' }}{% if item and item.model and item.vendor_sku %} / {% endif %}{{ item.vendor_sku or '' }}</small></td>
+          <td class="num"><strong>{{ r.qty }}</strong></td>
+          <td class="num"><small>{{ line.qty_received }}/{{ line.qty }}</small></td>
+          <td><small>{{ r.received_by or '' }}</small></td>
+          <td>
+            <small>{{ r.notes or '' }}</small>
+            <small class="shp-vby">{% if r.is_verified %}✓ {{ r.verified_by or '' }}{% endif %}</small>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% endfor %}
+
+<script>
+(function () {
+  var msgBox = document.getElementById('shp-msg');
+  var totalEl = document.getElementById('shp-verified-total');
+
+  function showMsg(text, isError) {
+    msgBox.textContent = text;
+    msgBox.hidden = false;
+    msgBox.className = 'rcv-msg ' + (isError ? 'rcv-msg-error' : 'rcv-msg-ok');
+  }
+
+  function post(form) {
+    return fetch(form.action, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+      body: new URLSearchParams(new FormData(form)),
+    }).then(function (resp) {
+      return resp.json().then(function (d) {
+        if (!resp.ok || !d.ok) throw new Error(d.error || 'Request failed.');
+        return d;
+      });
+    });
+  }
+
+  function applyRow(state) {
+    var row = document.querySelector('.shp-row[data-receipt-id="' + state.id + '"]');
+    if (!row) return;
+    row.classList.toggle('shp-verified', state.verified);
+    var btn = row.querySelector('.shp-vbtn');
+    btn.textContent = state.verified ? '✓' : '';
+    btn.setAttribute('aria-pressed', state.verified ? 'true' : 'false');
+    btn.title = state.verified ? 'Verified by ' + (state.verified_by || '?') + ' - click to clear'
+                               : 'Mark verified';
+    row.querySelector('.shp-verify input[name=verified]').value = state.verified ? '0' : '1';
+    row.querySelector('.shp-vby').textContent = state.verified ? '✓ ' + (state.verified_by || '') : '';
+  }
+
+  // Recount every group from the DOM so per-PO, per-day and page totals agree.
+  function recount() {
+    var total = 0;
+    document.querySelectorAll('.shp-day').forEach(function (day) {
+      var dayCount = 0;
+      day.querySelectorAll('.shp-po').forEach(function (po) {
+        var rows = po.querySelectorAll('.shp-row');
+        var n = po.querySelectorAll('.shp-row.shp-verified').length;
+        po.querySelector('.shp-vcount').textContent = n;
+        po.classList.toggle('shp-done', n === rows.length);
+        dayCount += n;
+      });
+      day.querySelector('.shp-day-stats .shp-vcount').textContent = dayCount;
+      day.classList.toggle('shp-done',
+        dayCount === day.querySelectorAll('.shp-row').length);
+      total += dayCount;
+    });
+    if (totalEl) totalEl.textContent = total;
+  }
+
+  document.addEventListener('submit', function (ev) {
+    var form = ev.target;
+    if (!form.classList.contains('shp-verify') && !form.classList.contains('shp-bulk')) return;
+    ev.preventDefault();
+    post(form).then(function (d) {
+      (d.receipts || [d.receipt]).forEach(applyRow);
+      recount();
+      if (form.classList.contains('shp-bulk')) {
+        showMsg('Verified ' + d.receipts.length + ' receipt' + (d.receipts.length === 1 ? '' : 's') + '.', false);
+      } else {
+        msgBox.hidden = true;
+      }
+    }).catch(function (err) { showMsg(err.message, true); });
+  });
+})();
+</script>
+{% endblock %}

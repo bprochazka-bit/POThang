@@ -39,9 +39,22 @@ ITEM_STATES = [
     "error",
 ]
 
+# --- Display ---
+# Time zone used to group receipts into days on the received-shipments view
+# (an IANA name such as "America/Chicago"). None = the server's local zone.
+DISPLAY_TIMEZONE = None
+
 # --- Auth ---
 # One of: "single_user", "proxy_header", "ldap"
 AUTH_MODE = "single_user"
+
+# API tokens for the Android app (and any other HTTP client), valid in every
+# AUTH_MODE. Map a long random token to the username receipts are recorded
+# under. Generate one with:  python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+# The app sends it as "Authorization: Bearer <token>".
+API_TOKENS = {
+    # "paste-a-long-random-token-here": "receiving-phone",
+}
 
 # single_user mode
 SINGLE_USER_NAME = "bill"

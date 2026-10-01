@@ -16,6 +16,8 @@ pip; no Docker required.
 - **Quick add** workflow: a task-tag picker plus a single-row form for rapid stub entry (just a name + qty), with details filled in later via edit.
 - Purchase orders: group items (or partial qty of items) into POs, manual PO numbering
 - Partial receipt tracking with receipt history per line
+- **Received shipments view** (`/pos/receiving/shipments`): every receipt grouped by day, then by PO, with per-day / per-PO totals and a verify tick per receipt (or a whole day / PO at once) so a second person can double-check against packing slips. Filter by date range, PO, text, or verified state; prints cleanly. Days follow `DISPLAY_TIMEZONE` (default: server local time).
+- **Android receiving app** (`android/`): scan labels with the camera + on-device OCR to find the matching PO line and enter the received qty; add new items from a photo or screenshot. Talks to the JSON API at `/api/v1` (bearer tokens via `API_TOKENS`). See `android/README.md`.
 - **Receiving view**: receive lines inline (one click, no page reload), undo a receipt or change its received qty, filter lines by item/vendor or receipt status, and see live line/quantity counts
 - File attachments (quotes, images, datasheets) stored on disk with sha256 names
 - Filtering by state, completeness, cost range, tag, PO, vendor, free-text search
@@ -78,6 +80,8 @@ All config lives in `instance/config.py` (created on first run from
 `config.example.py`). Key settings:
 
 - `AUTH_MODE` — `single_user`, `proxy_header`, or `ldap`
+- `API_TOKENS` — `{token: username}` bearer tokens for the Android app / API clients (valid in every auth mode)
+- `DISPLAY_TIMEZONE` — IANA zone used to group receipts by day (default: server local time)
 - `PROXY_HEADER_NAME` — header your reverse proxy / Authentik sets, default `X-Remote-User`
 - `LDAP_URI`, `LDAP_BIND_DN`, etc. — only consulted if `AUTH_MODE == 'ldap'`
 - `UPLOAD_DIR` — where attachments live (default `./uploads`)

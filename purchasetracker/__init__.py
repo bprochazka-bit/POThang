@@ -68,6 +68,7 @@ def create_app(config_overrides=None):
     from .blueprints.io import bp as io_bp
     from .blueprints.main import bp as main_bp
     from .blueprints.templates import bp as templates_bp
+    from .blueprints.api import bp as api_bp
 
     app.register_blueprint(main_bp)
     app.register_blueprint(items_bp, url_prefix="/items")
@@ -75,6 +76,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(attachments_bp, url_prefix="/attachments")
     app.register_blueprint(io_bp, url_prefix="/io")
     app.register_blueprint(templates_bp, url_prefix="/templates")
+    app.register_blueprint(api_bp, url_prefix="/api/v1")
 
     # Create tables on first run, then run any in-place schema migrations
     # for installs that already had data from an earlier version.

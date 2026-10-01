@@ -524,3 +524,40 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .rcv-tag-table td.zero { color: var(--fg-subtle); }
 .rcv-tag-table tr.rcv-tag-total td { border-top: 1px solid var(--border); font-weight: 600; background: var(--surface-2); }
 .rcv-tag-table tr.rcv-tag-untagged td:first-child { color: var(--fg-muted); font-style: italic; }
+
+/* ---------- Received shipments (receipts by day) ---------- */
+.shp-head { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.shp-head h1 { margin-bottom: 0.3rem; }
+.shp-head-actions { margin-left: auto; display: flex; gap: 0.8rem; align-items: center; }
+#shp-filters label { color: var(--fg-muted); font-size: 0.85rem; }
+.shp-day-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem 1rem; }
+.shp-day-head h2 { margin: 0; }
+.shp-day-stats { display: flex; flex-wrap: wrap; gap: 0.3rem 0.9rem; align-items: center;
+                 color: var(--fg-muted); font-size: 0.9rem; margin-left: auto; }
+.shp-day-stats strong { color: var(--fg); }
+.shp-day.shp-done { border-color: rgba(93,211,158,0.45); }
+.shp-done > .shp-day-head .shp-progress,
+.shp-po.shp-done .shp-po-stats { color: var(--success); }
+.shp-po { margin-top: 0.9rem; }
+.shp-po h3 { display: flex; flex-wrap: wrap; gap: 0.3rem 0.6rem; align-items: center; margin: 0 0 0.4rem; }
+.shp-po h3 form.shp-bulk { margin-left: auto; }
+.shp-table-wrap { overflow-x: auto; }
+.shp-table .shp-check-col { width: 2.6rem; text-align: center; }
+.shp-vbtn {
+  width: 1.7rem; height: 1.7rem; padding: 0; line-height: 1;
+  font-size: 1rem; font-weight: 700; color: var(--success);
+}
+.shp-row.shp-verified td { background: rgba(93,211,158,0.07); }
+.shp-row.shp-verified .shp-vbtn { border-color: rgba(93,211,158,0.6); background: rgba(93,211,158,0.15); }
+.shp-vby { display: block; color: var(--success); }
+
+@media print {
+  header, footer, .no-print, .flashes { display: none !important; }
+  html, body { background: #fff; color: #000; }
+  main { padding: 0; }
+  section.card { background: #fff; border: 1px solid #999; box-shadow: none; break-inside: avoid-page; }
+  table.data th, table.data td { color: #000; border-color: #bbb; background: #fff !important; }
+  a, .meta, small, .shp-day-stats, .rcv-summary { color: #000 !important; }
+  .shp-vbtn { border: 1px solid #000; color: #000; background: #fff !important; }
+  .shp-verify { display: inline-flex !important; }
+}

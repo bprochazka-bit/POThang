@@ -7,6 +7,7 @@ mounts a /login and /logout route for the modes that need them.
 """
 from __future__ import annotations
 
+import hmac
 from functools import wraps
 from typing import Optional
 
@@ -36,6 +37,15 @@ def login_required(view):
 def init_auth(app):
     @app.before_request
     def _resolve_user():
+        # API clients (the Android app) authenticate with a bearer token from
+        # config.API_TOKENS, in every auth mode. A token that is sent but not
+        # recognised never falls through to the mode's own resolution.
+        auth = request.headers.get("Authorization", "")
+        if auth[:7].lower() == "bearer ":
+            g.user = _user_for_token(auth[7:].strip())
+            g.api_token = g.user is not None
+            return
+
         mode = app.config.get("AUTH_MODE", "single_user")
         if mode == "single_user":
             g.user = {"name": app.config.get("SINGLE_USER_NAME", "user")}
@@ -64,6 +74,17 @@ def init_auth(app):
         g.user = None
 
     app.register_blueprint(_make_auth_bp())
+
+
+def _user_for_token(token: str) -> Optional[dict]:
+    """Map a bearer token to a user via config.API_TOKENS ({token: name})."""
+    if not token:
+        return None
+    tokens = current_app.config.get("API_TOKENS") or {}
+    for known, name in tokens.items():
+        if known and hmac.compare_digest(known.encode(), token.encode()):
+            return {"name": name, "via": "token"}
+    return None
 
 
 def _make_auth_bp() -> Blueprint:

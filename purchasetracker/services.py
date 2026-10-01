@@ -82,6 +82,177 @@ def recompute_item_state(item: Item) -> None:
         item.state = "requested"
 
 
+# ---------- Receipts ----------
+
+def sync_po_receipt_status(po: Optional[PurchaseOrder]) -> None:
+    """Keep the auto-derived "received" PO status in step with its receipts.
+
+    A fully received PO moves to "received"; a reduced or removed receipt
+    pulls it back to "ordered" so it shows up as receivable again.
+    """
+    if po is None:
+        return
+    if po.status == "received" and not po.fully_received:
+        po.status = "ordered"
+    elif po.fully_received and po.status != "received":
+        po.status = "received"
+
+
+def record_receipt(line: POLine, qty: int, notes: Optional[str] = None,
+                   received_by: Optional[str] = None) -> Receipt:
+    """Record a receipt of `qty` units against `line`.
+
+    The qty is clamped to what is still outstanding on the line, so a single
+    receipt can never push a line past its ordered qty. Raises ValueError for
+    a non-positive qty or a line that is already fully received. Updates the
+    item state and PO status; the caller commits.
+    """
+    if qty is None or qty <= 0:
+        raise ValueError("Receipt quantity must be positive.")
+    outstanding = line.qty - line.qty_received
+    if outstanding <= 0:
+        raise ValueError("Line is already fully received.")
+    qty = min(qty, outstanding)
+
+    receipt = Receipt(qty=qty, notes=(notes or "").strip() or None,
+                      received_by=received_by)
+    # Append via the relationship (not session.add) so the already-loaded
+    # line.receipts collection reflects the new row immediately - otherwise
+    # fully_received below computes off stale state.
+    line.receipts.append(receipt)
+    db.session.flush()
+    if line.item is not None:
+        recompute_item_state(line.item)
+    sync_po_receipt_status(line.po)
+    return receipt
+
+
+def to_display_tz(value: Optional[dt.datetime]) -> Optional[dt.datetime]:
+    """Convert a naive-UTC DB timestamp into the configured display zone.
+
+    DISPLAY_TIMEZONE is an IANA name (e.g. "America/Chicago"); when unset the
+    server's local zone is used, which is what a LAN install usually wants.
+    """
+    if value is None:
+        return None
+    aware = value.replace(tzinfo=dt.timezone.utc)
+    tz_name = current_app.config.get("DISPLAY_TIMEZONE")
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            return aware.astimezone(ZoneInfo(tz_name)).replace(tzinfo=None)
+        except Exception:  # unknown zone / missing tzdata: fall back to local
+            current_app.logger.warning("Unknown DISPLAY_TIMEZONE %r", tz_name)
+    return aware.astimezone().replace(tzinfo=None)
+
+
+def receipts_by_day(start: Optional[dt.date] = None,
+                    end: Optional[dt.date] = None,
+                    po_id: Optional[int] = None,
+                    search: Optional[str] = None,
+                    verified: Optional[bool] = None) -> list[dict]:
+    """Group receipts by (display-zone) calendar day, newest day first.
+
+    Within each day, receipts are grouped by PO so they line up with the
+    packing slips that came in. Each level carries totals and a verified
+    count so a second person can see at a glance what is left to check.
+
+    Filters: inclusive date range (display-zone dates), a single PO, a
+    case-insensitive substring over item name / model / vendor / SKU / PO
+    number / notes / receiver, and verified True/False.
+    """
+    q = (
+        db.session.query(Receipt)
+        .join(POLine, Receipt.line_id == POLine.id)
+        .join(PurchaseOrder, POLine.po_id == PurchaseOrder.id)
+    )
+    if po_id is not None:
+        q = q.filter(POLine.po_id == po_id)
+    if verified is True:
+        q = q.filter(Receipt.verified_at.isnot(None))
+    elif verified is False:
+        q = q.filter(Receipt.verified_at.is_(None))
+    # Pre-filter on a padded UTC window; the exact day cut happens after the
+    # timezone conversion below.
+    if start is not None:
+        q = q.filter(Receipt.received_at >= dt.datetime.combine(
+            start - dt.timedelta(days=1), dt.time.min))
+    if end is not None:
+        q = q.filter(Receipt.received_at < dt.datetime.combine(
+            end + dt.timedelta(days=2), dt.time.min))
+    receipts = q.order_by(Receipt.received_at.desc(), Receipt.id.desc()).all()
+
+    needle = (search or "").strip().lower()
+    days: dict[dt.date, dict] = {}
+    for r in receipts:
+        local = to_display_tz(r.received_at)
+        day = local.date() if local else None
+        if day is None:
+            continue
+        if start is not None and day < start:
+            continue
+        if end is not None and day > end:
+            continue
+        line = r.line
+        item = line.item if line else None
+        po = line.po if line else None
+        if needle:
+            hay = " ".join(filter(None, [
+                item.name if item else None,
+                item.model if item else None,
+                item.vendor if item else None,
+                item.vendor_sku if item else None,
+                po.po_number if po else None,
+                po.vendor if po else None,
+                r.notes, r.received_by,
+            ])).lower()
+            if needle not in hay:
+                continue
+
+        d = days.setdefault(day, {
+            "date": day, "pos": {}, "receipt_count": 0, "units": 0,
+            "verified_count": 0, "item_ids": set(),
+        })
+        d["receipt_count"] += 1
+        d["units"] += r.qty
+        d["verified_count"] += 1 if r.is_verified else 0
+        if item is not None:
+            d["item_ids"].add(item.id)
+
+        po_key = po.id if po else 0
+        g = d["pos"].setdefault(po_key, {
+            "po": po, "receipts": [], "units": 0, "verified_count": 0,
+        })
+        g["units"] += r.qty
+        g["verified_count"] += 1 if r.is_verified else 0
+        g["receipts"].append({
+            "receipt": r, "line": line, "item": item, "local_time": local,
+        })
+
+    out = []
+    for day in sorted(days, reverse=True):
+        d = days[day]
+        groups = sorted(d["pos"].values(),
+                        key=lambda g: (g["po"].po_number if g["po"] else ""))
+        for g in groups:
+            # Within a PO, oldest first reads like the order things were
+            # unpacked; tie-break on line number.
+            g["receipts"].sort(key=lambda e: (
+                e["local_time"], e["line"].line_no if e["line"] else 0))
+            g["receipt_count"] = len(g["receipts"])
+            g["all_verified"] = g["verified_count"] == g["receipt_count"]
+        out.append({
+            "date": day,
+            "po_groups": groups,
+            "receipt_count": d["receipt_count"],
+            "units": d["units"],
+            "item_count": len(d["item_ids"]),
+            "verified_count": d["verified_count"],
+            "all_verified": d["verified_count"] == d["receipt_count"],
+        })
+    return out
+
+
 # ---------- PO line numbering ----------
 
 def next_po_line_no(po_id: int) -> int:

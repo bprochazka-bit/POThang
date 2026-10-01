@@ -22,6 +22,7 @@ def run_migrations() -> None:
     _migrate_add_item_name()
     _migrate_add_po_line_no()
     _migrate_add_item_error_reason()
+    _migrate_add_receipt_verification()
 
 
 def _migrate_add_item_name() -> None:
@@ -103,3 +104,22 @@ def _migrate_add_item_error_reason() -> None:
 
     with db.engine.begin() as conn:
         conn.execute(text("ALTER TABLE items ADD COLUMN error_reason TEXT"))
+
+
+def _migrate_add_receipt_verification() -> None:
+    """v8: add receipts.verified_at / verified_by for double verification.
+
+    The received-shipments view lets a second person tick off each receipt
+    after checking it against the packing slip. Older DBs have neither
+    column; add both (nullable, so existing receipts start unverified).
+    """
+    insp = inspect(db.engine)
+    if "receipts" not in insp.get_table_names():
+        return  # fresh DB, create_all() sets up the new schema directly
+
+    cols = {c["name"] for c in insp.get_columns("receipts")}
+    with db.engine.begin() as conn:
+        if "verified_at" not in cols:
+            conn.execute(text("ALTER TABLE receipts ADD COLUMN verified_at DATETIME"))
+        if "verified_by" not in cols:
+            conn.execute(text("ALTER TABLE receipts ADD COLUMN verified_by VARCHAR(128)"))

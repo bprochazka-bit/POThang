@@ -20,7 +20,8 @@ from ..models import (
 )
 from ..services import (
     delete_po_document, move_po_line, next_po_line_no, next_po_revision,
-    po_document_path, recompute_item_state, render_po_xlsx, store_po_document,
+    po_document_path, receipts_by_day, recompute_item_state, record_receipt,
+    render_po_xlsx, store_po_document, sync_po_receipt_status, to_display_tz,
 )
 
 bp = Blueprint("pos", __name__)
@@ -325,30 +326,12 @@ def delete_line(line_id: int):
 def receive_line(line_id: int):
     line = db.session.get(POLine, line_id) or abort(404)
     qty = request.form.get("qty", type=int) or 0
-    if qty <= 0:
-        return _receive_error(line.po_id, "Receipt quantity must be positive.")
-
-    # Never let a single receipt push a line over what's outstanding.
-    outstanding = line.qty - line.qty_received
-    if outstanding <= 0:
-        return _receive_error(line.po_id, "Line is already fully received.")
-    if qty > outstanding:
-        qty = outstanding
-
-    receipt = Receipt(
-        qty=qty,
-        notes=request.form.get("notes", "").strip() or None,
-    )
-    # Append via the relationship (not session.add) so the already-loaded
-    # line.receipts collection reflects the new row immediately - otherwise
-    # fully_received below computes off stale state.
-    line.receipts.append(receipt)
-    db.session.flush()
-    recompute_item_state(line.item)
-
-    # If everything on the PO is received, move PO to received.
-    if line.po and line.po.fully_received and line.po.status != "received":
-        line.po.status = "received"
+    try:
+        receipt = record_receipt(line, qty, notes=request.form.get("notes"),
+                                 received_by=_user_name())
+    except ValueError as e:
+        return _receive_error(line.po_id, str(e))
+    qty = receipt.qty
 
     db.session.commit()
     msg = f"Recorded receipt of {qty}."
@@ -385,6 +368,10 @@ def update_receipt(receipt_id: int):
             f"({line.qty} ordered, {other} on other receipts).",
         )
 
+    if new_qty != receipt.qty:
+        # A verified count that changes is no longer verified.
+        receipt.verified_at = None
+        receipt.verified_by = None
     receipt.qty = new_qty
     db.session.flush()
     _resync_after_receipt_change(line)
@@ -432,13 +419,11 @@ def _resync_after_receipt_change(line: POLine) -> None:
         return
     if line.item is not None:
         recompute_item_state(line.item)
-    po = line.po
-    if po is None:
-        return
-    if po.status == "received" and not po.fully_received:
-        po.status = "ordered"
-    elif po.fully_received and po.status != "received":
-        po.status = "received"
+    sync_po_receipt_status(line.po)
+
+
+def _user_name():
+    return (current_user() or {}).get("name")
 
 
 def _wants_json() -> bool:
@@ -613,7 +598,6 @@ def receiving_receive(po_id: int):
     note = (request.form.get("notes") or "").strip() or None
     received_lines = 0
     received_units = 0
-    touched_items: set[int] = set()
 
     for line in po.lines:
         outstanding = line.qty - line.qty_received
@@ -628,29 +612,14 @@ def receiving_receive(po_id: int):
             continue
         if qty <= 0:
             continue
-        if qty > outstanding:
-            qty = outstanding
-        receipt = Receipt(qty=qty, notes=note)
-        # Append via the relationship so line.receipts reflects the new row
-        # immediately (otherwise fully_received computes off stale state).
-        line.receipts.append(receipt)
+        receipt = record_receipt(line, qty, notes=note,
+                                 received_by=_user_name())
         received_lines += 1
-        received_units += qty
-        if line.item_id is not None:
-            touched_items.add(line.item_id)
+        received_units += receipt.qty
 
     if received_lines == 0:
         flash("No quantities entered - nothing received.", "error")
         return redirect(url_for("pos.receiving_index", po_id=po.id))
-
-    db.session.flush()
-    for item_id in touched_items:
-        item = db.session.get(Item, item_id)
-        if item is not None:
-            recompute_item_state(item)
-
-    if po.fully_received and po.status != "received":
-        po.status = "received"
 
     db.session.commit()
     flash(
@@ -659,6 +628,111 @@ def receiving_receive(po_id: int):
         f"on PO {po.po_number}."
     )
     return redirect(url_for("pos.receiving_index", po_id=po.id))
+
+
+# ---------- Received shipments (receipts grouped by day) ----------
+
+SHIPMENTS_DEFAULT_DAYS = 14
+
+
+def _parse_date(raw):
+    try:
+        return dt.date.fromisoformat((raw or "").strip())
+    except ValueError:
+        return None
+
+
+@bp.route("/receiving/shipments")
+@login_required
+def shipments():
+    """Every receipt, grouped by day then PO, for double verification."""
+    today = (to_display_tz(dt.datetime.utcnow()) or dt.datetime.now()).date()
+    start = _parse_date(request.args.get("from"))
+    end = _parse_date(request.args.get("to"))
+    if start is None and end is None and not request.args.get("all"):
+        start = today - dt.timedelta(days=SHIPMENTS_DEFAULT_DAYS - 1)
+    if start and end and start > end:
+        start, end = end, start
+    po_id = request.args.get("po_id", type=int)
+    search = (request.args.get("q") or "").strip()
+    verified_arg = request.args.get("verified", "")
+    verified = {"yes": True, "no": False}.get(verified_arg)
+
+    days = receipts_by_day(start=start, end=end, po_id=po_id,
+                           search=search, verified=verified)
+    po_choices = (
+        db.session.query(PurchaseOrder)
+        .filter(PurchaseOrder.lines.any(POLine.receipts.any()))
+        .order_by(PurchaseOrder.po_number)
+        .all()
+    )
+    return render_template(
+        "pos/shipments.html",
+        days=days, start=start, end=end, today=today, po_id=po_id,
+        search=search, verified_arg=verified_arg, po_choices=po_choices,
+        show_all=bool(request.args.get("all")),
+        totals={
+            "receipts": sum(d["receipt_count"] for d in days),
+            "units": sum(d["units"] for d in days),
+            "verified": sum(d["verified_count"] for d in days),
+        },
+    )
+
+
+def _set_verified(receipt: Receipt, verified: bool) -> None:
+    if verified:
+        if receipt.verified_at is None:
+            receipt.verified_at = dt.datetime.utcnow()
+            receipt.verified_by = _user_name()
+    else:
+        receipt.verified_at = None
+        receipt.verified_by = None
+
+
+def _receipt_verify_state(receipt: Receipt) -> dict:
+    local = to_display_tz(receipt.verified_at)
+    return {
+        "id": receipt.id,
+        "verified": receipt.is_verified,
+        "verified_by": receipt.verified_by,
+        "verified_at": local.strftime("%Y-%m-%d %H:%M") if local else None,
+    }
+
+
+@bp.route("/receipts/<int:receipt_id>/verify", methods=["POST"])
+@login_required
+def verify_receipt(receipt_id: int):
+    """Mark (verified=1, default) or unmark (verified=0) one receipt."""
+    receipt = db.session.get(Receipt, receipt_id) or abort(404)
+    verified = request.form.get("verified", "1") not in ("0", "false", "")
+    _set_verified(receipt, verified)
+    db.session.commit()
+    if _wants_json():
+        return jsonify({"ok": True, "receipt": _receipt_verify_state(receipt)})
+    flash("Receipt verified." if verified else "Verification cleared.")
+    return redirect(request.referrer or url_for("pos.shipments"))
+
+
+@bp.route("/receipts/verify-bulk", methods=["POST"])
+@login_required
+def verify_receipts_bulk():
+    """Verify (or un-verify) a batch of receipts, e.g. a whole day or PO."""
+    ids = [int(x) for x in request.form.getlist("receipt_ids") if x.isdigit()]
+    verified = request.form.get("verified", "1") not in ("0", "false", "")
+    receipts = (
+        db.session.query(Receipt).filter(Receipt.id.in_(ids)).all()
+        if ids else []
+    )
+    for r in receipts:
+        _set_verified(r, verified)
+    db.session.commit()
+    if _wants_json():
+        return jsonify({"ok": True,
+                        "receipts": [_receipt_verify_state(r) for r in receipts]})
+    n = len(receipts)
+    flash(f"{'Verified' if verified else 'Cleared verification on'} "
+          f"{n} receipt{'' if n == 1 else 's'}.")
+    return redirect(request.referrer or url_for("pos.shipments"))
 
 
 @bp.route("/<int:po_id>/render", methods=["POST"])

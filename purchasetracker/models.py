@@ -315,8 +315,16 @@ class Receipt(db.Model):
     received_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
     received_by = Column(String(128))
     notes = Column(Text)
+    # Second-person check of a receipt (the "double verification" step on the
+    # received-shipments view). Both NULL until someone ticks it off.
+    verified_at = Column(DateTime)
+    verified_by = Column(String(128))
 
     line = relationship("POLine", back_populates="receipts")
+
+    @property
+    def is_verified(self) -> bool:
+        return self.verified_at is not None
 
     def to_dict(self) -> dict:
         return {
@@ -326,6 +334,8 @@ class Receipt(db.Model):
             "received_at": self.received_at.isoformat() if self.received_at else None,
             "received_by": self.received_by,
             "notes": self.notes,
+            "verified_at": self.verified_at.isoformat() if self.verified_at else None,
+            "verified_by": self.verified_by,
         }
 
 

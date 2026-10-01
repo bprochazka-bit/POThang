@@ -29,6 +29,13 @@ ITEM_STATES = [
 ]
 
 AUTH_MODE = "single_user"
+
+# Bearer tokens for API clients (the Android app): {"token": "username"}.
+API_TOKENS = {}
+
+# IANA zone for grouping receipts by day (e.g. "America/Chicago").
+# None = the server's local time zone.
+DISPLAY_TIMEZONE = None
 SINGLE_USER_NAME = "bill"
 
 PROXY_HEADER_NAME = "X-Remote-User"
