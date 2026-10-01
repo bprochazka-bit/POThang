@@ -300,3 +300,189 @@ def test_receiving_caps_qty_at_outstanding(client, db):
                 follow_redirects=True)
     db.session.refresh(line)
     assert line.qty_received == 5
+
+
+# ---------- Receipt undo / edit (requirement #1) ----------
+
+def _seed_ordered_line(client, db, qty=5):
+    item, po = _seed_one_complete_item(db, qty=qty)
+    client.post(f"/pos/{po.id}/lines/add",
+                data={"item_id": item.id, "qty": str(qty)},
+                follow_redirects=True)
+    client.post(f"/pos/{po.id}/edit",
+                data={"vendor": "", "ship_to": "", "notes": "",
+                      "status": "ordered"},
+                follow_redirects=True)
+    line = db.session.query(POLine).filter_by(po_id=po.id).one()
+    return item, po, line
+
+
+def test_delete_receipt_undoes_it(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "3"}, follow_redirects=True)
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+
+    client.post(f"/pos/receipts/{receipt.id}/delete", follow_redirects=True)
+    db.session.refresh(line)
+    assert line.qty_received == 0
+    assert db.session.query(Receipt).filter_by(line_id=line.id).count() == 0
+
+
+def test_update_receipt_changes_qty(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "3"}, follow_redirects=True)
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+
+    client.post(f"/pos/receipts/{receipt.id}/update",
+                data={"qty": "2"}, follow_redirects=True)
+    db.session.refresh(line)
+    assert line.qty_received == 2
+
+
+def test_update_receipt_over_ordered_is_rejected(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "3"}, follow_redirects=True)
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+
+    resp = client.post(f"/pos/receipts/{receipt.id}/update",
+                       data={"qty": "99"}, follow_redirects=True)
+    assert b"at most" in resp.data
+    db.session.refresh(line)
+    assert line.qty_received == 3  # unchanged
+
+
+def test_undo_receipt_reverts_po_from_received(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    # Fully receive -> PO becomes received.
+    client.post(f"/pos/lines/{line.id}/receive",
+                data={"qty": "5"}, follow_redirects=True)
+    db.session.refresh(po)
+    assert po.status == "received"
+
+    receipt = db.session.query(Receipt).filter_by(line_id=line.id).one()
+    client.post(f"/pos/receipts/{receipt.id}/delete", follow_redirects=True)
+    db.session.refresh(po)
+    # No longer fully received -> back to an active, receivable status.
+    assert po.status == "ordered"
+
+
+# ---------- AJAX receive (requirement #5) ----------
+
+def test_receive_line_returns_json_for_ajax(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.post(
+        f"/pos/lines/{line.id}/receive",
+        data={"qty": "2"},
+        headers={"X-Requested-With": "XMLHttpRequest",
+                 "Accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.is_json
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["line"]["qty_received"] == 2
+    assert payload["line"]["outstanding"] == 3
+    assert payload["po"]["total_received"] == 2
+    assert len(payload["line"]["receipts"]) == 1
+
+
+def test_receive_line_ajax_error_is_json(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.post(
+        f"/pos/lines/{line.id}/receive",
+        data={"qty": "0"},
+        headers={"X-Requested-With": "XMLHttpRequest",
+                 "Accept": "application/json"},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+# ---------- Receiving view counts & selection (requirement #3) ----------
+
+def test_receiving_view_shows_counts_and_lines(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.get(f"/pos/receiving/?po_id={po.id}")
+    assert resp.status_code == 200
+    # Summary block and the per-line receive control are present.
+    assert b"rcv-summary" in resp.data
+    assert b"Filter by item or vendor" in resp.data
+    assert b"Bolt" in resp.data
+
+
+# ---------- By-tag receiving summary ----------
+
+def _tagged_line(db, po, name, qty, tags, state=None, received=0):
+    item = Item(name=name, description="d", qty=qty, unit_cost=1.0,
+                vendor="V", url="http://x")
+    db.session.add(item)
+    db.session.flush()
+    item.tags = [get_or_create_tag(t) for t in tags]
+    if state:
+        item.state = state
+    line = POLine(po_id=po.id, item_id=item.id, qty=qty, unit_cost=1.0)
+    db.session.add(line)
+    db.session.flush()
+    if received:
+        line.receipts.append(Receipt(qty=received))
+    db.session.commit()
+    return item, line
+
+
+def test_tag_summary_counts_by_status_and_tag(db):
+    from purchasetracker.blueprints.pos import _receiving_tag_summary
+    po = PurchaseOrder(po_number="PO-TS", status="ordered")
+    db.session.add(po)
+    db.session.flush()
+    _tagged_line(db, po, "A", 5, ["ProjX", "Sub1"])                 # outstanding
+    _tagged_line(db, po, "B", 4, ["ProjX"], received=4)             # received
+    _tagged_line(db, po, "C", 6, ["ProjX", "Sub2"], received=2)     # partial
+    _tagged_line(db, po, "E", 3, ["Sub1"], state="error")          # error
+    _tagged_line(db, po, "X", 2, [], state="cancelled")            # cancelled/untagged
+
+    ts = _receiving_tag_summary(po)
+    rows = {r["tag"]: r for r in ts["rows"]}
+
+    # Multi-tag item counted under each tag.
+    assert rows["ProjX"]["counts"] == {
+        "outstanding": 1, "partial": 1, "received": 1, "error": 0, "cancelled": 0}
+    assert rows["ProjX"]["total"] == 3
+    assert rows["Sub1"]["counts"]["outstanding"] == 1
+    assert rows["Sub1"]["counts"]["error"] == 1
+    assert rows["Sub2"]["counts"]["partial"] == 1
+
+    # Untagged bucket holds the cancelled item.
+    assert ts["untagged"]["counts"]["cancelled"] == 1
+
+    # Totals count each line exactly once.
+    assert ts["totals"]["counts"] == {
+        "outstanding": 1, "partial": 1, "received": 1, "error": 1, "cancelled": 1}
+    assert ts["totals"]["total"] == 5
+
+
+def test_tag_summary_state_takes_precedence_over_receipts(db):
+    """A received-but-errored item is bucketed as error, not received."""
+    from purchasetracker.blueprints.pos import _receiving_tag_summary
+    po = PurchaseOrder(po_number="PO-TS2", status="ordered")
+    db.session.add(po)
+    db.session.flush()
+    _tagged_line(db, po, "Q", 5, ["ProjY"], state="error", received=5)
+
+    ts = _receiving_tag_summary(po)
+    row = ts["rows"][0]
+    assert row["counts"]["error"] == 1
+    assert row["counts"]["received"] == 0
+
+
+def test_tag_summary_in_ajax_payload(client, db):
+    item, po, line = _seed_ordered_line(client, db, qty=5)
+    resp = client.post(
+        f"/pos/lines/{line.id}/receive", data={"qty": "5"},
+        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+    )
+    payload = resp.get_json()
+    assert "tag_summary" in payload
+    assert payload["tag_summary"]["totals"]["counts"]["received"] == 1

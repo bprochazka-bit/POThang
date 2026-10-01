@@ -1,0 +1,17 @@
+{# Server-rendered receipts for one line. Mirrors receiptsHtml() in
+   receiving.html so the no-JS view and the AJAX view stay in sync.
+   Expects `line` in context. #}
+{% for r in line.receipts %}
+<span class="receipt-chip" data-receipt-id="{{ r.id }}">
+  <form class="receipt-edit inline" method="post"
+        action="{{ url_for('pos.update_receipt', receipt_id=r.id) }}">
+    <input type="number" name="qty" value="{{ r.qty }}" min="1" style="width:4em">
+    <button type="submit" title="Save quantity">save</button>
+  </form>
+  <small> on {{ r.received_at.strftime('%Y-%m-%d') if r.received_at }}{% if r.notes %} ({{ r.notes }}){% endif %} </small>
+  <form class="receipt-del inline" method="post"
+        action="{{ url_for('pos.delete_receipt', receipt_id=r.id) }}">
+    <button type="submit" class="link" title="Undo this receipt">undo</button>
+  </form>
+</span>
+{% endfor %}

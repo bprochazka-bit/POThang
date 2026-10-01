@@ -157,3 +157,49 @@ def test_split_across_two_pos(db):
     recompute_item_state(item)
     assert item.state == "ordered"
     assert item.qty_on_active_pos == 10
+
+
+# ---------- Error state (requirement #4) ----------
+
+def test_error_state_is_terminal(db):
+    item = _make_item(db)
+    set_item_state(item, "error")
+    db.session.commit()
+    recompute_item_state(item)
+    # Terminal like cancelled - not overwritten by recomputation.
+    assert item.state == "error"
+
+
+def test_set_error_state_requires_reason(client, db):
+    item = _make_item(db, name="X", description="d", vendor="V",
+                      url="https://u", unit_cost=10.0)
+    # No reason -> rejected, state unchanged.
+    resp = client.post(f"/items/{item.id}/state",
+                       data={"state": "error"}, follow_redirects=True)
+    assert b"error reason is required" in resp.data
+    db.session.refresh(item)
+    assert item.state != "error"
+
+
+def test_set_error_state_stores_reason(client, db):
+    item = _make_item(db, name="X", description="d", vendor="V",
+                      url="https://u", unit_cost=10.0)
+    client.post(f"/items/{item.id}/state",
+                data={"state": "error", "error_reason": "Arrived damaged"},
+                follow_redirects=True)
+    db.session.refresh(item)
+    assert item.state == "error"
+    assert item.error_reason == "Arrived damaged"
+
+
+def test_leaving_error_state_clears_reason(client, db):
+    item = _make_item(db, name="X", description="d", vendor="V",
+                      url="https://u", unit_cost=10.0)
+    client.post(f"/items/{item.id}/state",
+                data={"state": "error", "error_reason": "Wrong part"},
+                follow_redirects=True)
+    client.post(f"/items/{item.id}/state",
+                data={"state": "requested"}, follow_redirects=True)
+    db.session.refresh(item)
+    assert item.state == "requested"
+    assert item.error_reason is None

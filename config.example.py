@@ -33,6 +33,10 @@ ITEM_STATES = [
     "partial",
     "received",
     "cancelled",
+    # Manually-set fault state. Requires a free-text reason (see the item
+    # detail page). Terminal like "cancelled" - not overwritten by the
+    # automatic state recomputation.
+    "error",
 ]
 
 # --- Auth ---

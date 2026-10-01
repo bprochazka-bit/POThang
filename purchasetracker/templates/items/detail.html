@@ -9,6 +9,12 @@
   &middot; <a href="{{ url_for('items.edit', item_id=item.id) }}">edit</a>
 </p>
 
+{% if item.state == 'error' %}
+<div class="flash flash-error">
+  <strong>Error:</strong> {{ item.error_reason or '(no reason given)' }}
+</div>
+{% endif %}
+
 {% if not item.is_complete %}
 <div class="flash flash-error" style="border-left: 3px solid var(--warning); border-color: rgba(240, 182, 107, 0.35); background: rgba(240, 182, 107, 0.10); color: #f3c98e;">
   <strong>Incomplete:</strong> missing {{ item.missing_fields | join(', ') }}.
@@ -34,17 +40,37 @@
 
 <section class="card">
   <h2>State</h2>
-  <form method="post" action="{{ url_for('items.change_state', item_id=item.id) }}" class="inline">
-    <select name="state">
+  <form method="post" action="{{ url_for('items.change_state', item_id=item.id) }}" class="inline" id="state-form">
+    <select name="state" id="state-select">
       {% for s in states %}
         <option value="{{ s }}" {% if s == item.state %}selected{% endif %}>{{ s }}</option>
       {% endfor %}
     </select>
+    <input type="text" name="error_reason" id="error-reason-input" maxlength="255"
+           placeholder="Error reason (required)" style="width: 20em"
+           value="{{ item.error_reason or '' }}"
+           {% if item.state != 'error' %}hidden{% endif %}>
     <button type="submit">Set state</button>
   </form>
   <p><small>States <code>ordered</code>, <code>partial</code>, and <code>received</code> are
   recomputed automatically from PO allocations and receipts. Setting them manually
-  is allowed but will be overwritten on the next change.</small></p>
+  is allowed but will be overwritten on the next change.
+  <code>cancelled</code> and <code>error</code> are terminal (kept until you change
+  them). Choosing <code>error</code> requires a reason.</small></p>
+  <script>
+  (function () {
+    var sel = document.getElementById('state-select');
+    var reason = document.getElementById('error-reason-input');
+    if (!sel || !reason) return;
+    function sync() {
+      var isError = sel.value === 'error';
+      reason.hidden = !isError;
+      reason.required = isError;
+    }
+    sel.addEventListener('change', sync);
+    sync();
+  })();
+  </script>
 </section>
 
 <section class="card">

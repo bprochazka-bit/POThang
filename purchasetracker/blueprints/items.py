@@ -146,11 +146,23 @@ def edit(item_id: int):
 def change_state(item_id: int):
     item = db.session.get(Item, item_id) or abort(404)
     new_state = request.form.get("state")
+    error_reason = (request.form.get("error_reason") or "").strip()
+
+    # The "error" state must carry a free-text reason.
+    if new_state == "error" and not error_reason:
+        flash("An error reason is required to set an item to the error state.",
+              "error")
+        return redirect(url_for("items.detail", item_id=item.id))
+
     try:
         set_item_state(item, new_state)
     except ValueError as e:
         flash(str(e), "error")
         return redirect(url_for("items.detail", item_id=item.id))
+
+    # Keep the reason only while the item is in the error state; clear it
+    # whenever the item moves to any other state.
+    item.error_reason = error_reason if new_state == "error" else None
     db.session.commit()
     flash(f"State set to {new_state}.")
     return redirect(url_for("items.detail", item_id=item.id))

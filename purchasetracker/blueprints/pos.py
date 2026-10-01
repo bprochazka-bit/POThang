@@ -9,7 +9,7 @@ from io import BytesIO
 from pathlib import Path
 
 from flask import (
-    Blueprint, Response, abort, current_app, flash, redirect,
+    Blueprint, Response, abort, current_app, flash, jsonify, redirect,
     render_template, request, send_file, url_for,
 )
 
@@ -326,14 +326,23 @@ def receive_line(line_id: int):
     line = db.session.get(POLine, line_id) or abort(404)
     qty = request.form.get("qty", type=int) or 0
     if qty <= 0:
-        flash("Receipt quantity must be positive.", "error")
-        return redirect(url_for("pos.detail", po_id=line.po_id))
+        return _receive_error(line.po_id, "Receipt quantity must be positive.")
+
+    # Never let a single receipt push a line over what's outstanding.
+    outstanding = line.qty - line.qty_received
+    if outstanding <= 0:
+        return _receive_error(line.po_id, "Line is already fully received.")
+    if qty > outstanding:
+        qty = outstanding
 
     receipt = Receipt(
-        line_id=line.id, qty=qty,
+        qty=qty,
         notes=request.form.get("notes", "").strip() or None,
     )
-    db.session.add(receipt)
+    # Append via the relationship (not session.add) so the already-loaded
+    # line.receipts collection reflects the new row immediately - otherwise
+    # fully_received below computes off stale state.
+    line.receipts.append(receipt)
     db.session.flush()
     recompute_item_state(line.item)
 
@@ -342,8 +351,215 @@ def receive_line(line_id: int):
         line.po.status = "received"
 
     db.session.commit()
-    flash(f"Recorded receipt of {qty}.")
+    msg = f"Recorded receipt of {qty}."
+    if _wants_json():
+        return jsonify({"ok": True, "message": msg,
+                        "line": _line_receiving_state(line),
+                        "po": _po_receiving_summary(line.po),
+                        "tag_summary": _receiving_tag_summary(line.po)})
+    flash(msg)
     return redirect(url_for("pos.detail", po_id=line.po_id))
+
+
+@bp.route("/receipts/<int:receipt_id>/update", methods=["POST"])
+@login_required
+def update_receipt(receipt_id: int):
+    """Change the qty on an existing receipt.
+
+    The new qty must be positive and must not push the line over its ordered
+    qty (accounting for the other receipts on the same line).
+    """
+    receipt = db.session.get(Receipt, receipt_id) or abort(404)
+    line = receipt.line
+    po_id = line.po_id if line else None
+    new_qty = request.form.get("qty", type=int)
+    if new_qty is None or new_qty <= 0:
+        return _receive_error(po_id, "Receipt quantity must be positive.")
+
+    other = line.qty_received - receipt.qty
+    if new_qty + other > line.qty:
+        allowed = line.qty - other
+        return _receive_error(
+            po_id,
+            f"Can receive at most {allowed} more on this line "
+            f"({line.qty} ordered, {other} on other receipts).",
+        )
+
+    receipt.qty = new_qty
+    db.session.flush()
+    _resync_after_receipt_change(line)
+    db.session.commit()
+    msg = f"Updated receipt to {new_qty}."
+    if _wants_json():
+        return jsonify({"ok": True, "message": msg,
+                        "line": _line_receiving_state(line),
+                        "po": _po_receiving_summary(line.po),
+                        "tag_summary": _receiving_tag_summary(line.po)})
+    flash(msg)
+    return redirect(url_for("pos.detail", po_id=po_id))
+
+
+@bp.route("/receipts/<int:receipt_id>/delete", methods=["POST"])
+@login_required
+def delete_receipt(receipt_id: int):
+    """Undo a receipt entirely."""
+    receipt = db.session.get(Receipt, receipt_id) or abort(404)
+    line = receipt.line
+    po_id = line.po_id if line else None
+    qty = receipt.qty
+    db.session.delete(receipt)
+    db.session.flush()
+    _resync_after_receipt_change(line)
+    db.session.commit()
+    msg = f"Removed receipt of {qty}."
+    if _wants_json():
+        # line may still exist; reload state from the (now flushed) line.
+        return jsonify({"ok": True, "message": msg,
+                        "line": _line_receiving_state(line),
+                        "po": _po_receiving_summary(line.po),
+                        "tag_summary": _receiving_tag_summary(line.po)})
+    flash(msg)
+    return redirect(url_for("pos.detail", po_id=po_id))
+
+
+def _resync_after_receipt_change(line: POLine) -> None:
+    """Recompute item state and PO status after a receipt is edited/removed.
+
+    A reduced or removed receipt can pull a PO back out of the auto-set
+    "received" status; drop it back to "ordered" so it stays receivable.
+    """
+    if line is None:
+        return
+    if line.item is not None:
+        recompute_item_state(line.item)
+    po = line.po
+    if po is None:
+        return
+    if po.status == "received" and not po.fully_received:
+        po.status = "ordered"
+    elif po.fully_received and po.status != "received":
+        po.status = "received"
+
+
+def _wants_json() -> bool:
+    """True when the caller expects a JSON reply (AJAX) rather than a redirect."""
+    if request.args.get("format") == "json":
+        return True
+    if request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest":
+        return True
+    accept = request.accept_mimetypes
+    return bool(accept["application/json"]) and (
+        accept["application/json"] >= accept["text/html"]
+    )
+
+
+def _receive_error(po_id, message: str):
+    """Return a JSON error (AJAX) or flash+redirect (plain form post)."""
+    if _wants_json():
+        return jsonify({"ok": False, "error": message}), 400
+    flash(message, "error")
+    return redirect(url_for("pos.detail", po_id=po_id))
+
+
+def _line_receiving_state(line: POLine) -> dict:
+    """Serialize the receiving-relevant state of a single line for AJAX."""
+    received = line.qty_received
+    return {
+        "id": line.id,
+        "qty": line.qty,
+        "qty_received": received,
+        "outstanding": line.qty - received,
+        "fully_received": received >= line.qty and line.qty > 0,
+        "receipts": [
+            {
+                "id": r.id,
+                "qty": r.qty,
+                "received_at": r.received_at.strftime("%Y-%m-%d")
+                               if r.received_at else "",
+                "notes": r.notes or "",
+            }
+            for r in sorted(line.receipts,
+                            key=lambda r: (r.received_at or dt.datetime.min,
+                                           r.id or 0))
+        ],
+    }
+
+
+def _po_receiving_summary(po: PurchaseOrder) -> dict:
+    """Aggregate counts/quantities for a PO's receiving view."""
+    lines = list(po.lines) if po else []
+    total_ordered = sum(l.qty for l in lines)
+    total_received = sum(l.qty_received for l in lines)
+    return {
+        "status": po.status if po else None,
+        "total_lines": len(lines),
+        "outstanding_lines": sum(1 for l in lines if l.qty - l.qty_received > 0),
+        "total_ordered": total_ordered,
+        "total_received": total_received,
+        "outstanding": total_ordered - total_received,
+        "fully_received": po.fully_received if po else False,
+    }
+
+
+# Receiving statuses used by the by-tag breakdown, in display order.
+RECEIVING_STATUSES = ["outstanding", "partial", "received", "error", "cancelled"]
+
+
+def _classify_line(line: POLine) -> str:
+    """Bucket a PO line into a single receiving status.
+
+    The item's manual terminal states (cancelled, error) take precedence over
+    receipt progress; otherwise the bucket reflects how much of THIS line has
+    been received.
+    """
+    item = line.item
+    if item is not None and item.state == "cancelled":
+        return "cancelled"
+    if item is not None and item.state == "error":
+        return "error"
+    received = line.qty_received
+    if line.qty > 0 and received >= line.qty:
+        return "received"
+    if received > 0:
+        return "partial"
+    return "outstanding"
+
+
+def _receiving_tag_summary(po: PurchaseOrder) -> dict:
+    """Count the PO's items by receiving status, grouped by tag.
+
+    An item with several tags is counted under each of its tags, so the tag
+    rows deliberately do not sum to the distinct-item totals. Untagged items
+    fall into their own row, and a totals row counts each line once.
+    """
+    def empty():
+        return {s: 0 for s in RECEIVING_STATUSES}
+
+    tags: dict[str, dict] = {}
+    untagged = empty()
+    totals = empty()
+    has_untagged = False
+
+    for line in (po.lines if po else []):
+        status = _classify_line(line)
+        totals[status] += 1
+        names = [t.name for t in line.item.tags] if line.item else []
+        if names:
+            for name in names:
+                tags.setdefault(name, empty())[status] += 1
+        else:
+            has_untagged = True
+            untagged[status] += 1
+
+    def row(label, counts):
+        return {"tag": label, "counts": counts, "total": sum(counts.values())}
+
+    return {
+        "statuses": RECEIVING_STATUSES,
+        "rows": [row(name, tags[name]) for name in sorted(tags)],
+        "untagged": row("(untagged)", untagged) if has_untagged else None,
+        "totals": row("All items", totals),
+    }
 
 
 # ---------- Receiving workflow ----------
@@ -371,14 +587,20 @@ def receiving_index():
     selected_id = request.args.get("po_id", type=int)
     pos = _receivable_pos()
     selected_po = None
+    summary = None
+    tag_summary = None
     if selected_id is not None:
         selected_po = db.session.get(PurchaseOrder, selected_id)
         if selected_po is None:
             abort(404)
+        summary = _po_receiving_summary(selected_po)
+        tag_summary = _receiving_tag_summary(selected_po)
     return render_template(
         "pos/receiving.html",
         pos=pos,
         selected_po=selected_po,
+        summary=summary,
+        tag_summary=tag_summary,
     )
 
 

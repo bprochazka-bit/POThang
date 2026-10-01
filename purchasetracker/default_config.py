@@ -25,6 +25,7 @@ ITEM_STATES = [
     "partial",
     "received",
     "cancelled",
+    "error",
 ]
 
 AUTH_MODE = "single_user"
